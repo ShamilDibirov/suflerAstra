@@ -183,3 +183,9 @@ fly deploy --config deploy/fly/gateway.toml
 Release command API применит миграции. Начального владельца создайте через CLI в API-контейнере с временными переменными `BOOTSTRAP_*`; после bootstrap удалите пароль из secrets. RAM/CPU в TOML — отправная точка, не подтверждённая нагрузочная конфигурация. Нужны мониторинг памяти, времени ASR/классификации/RAG, длины очереди, отказов источников и retention jobs.
 
 Инструкция опирается на [private networking Fly.io](https://fly.io/docs/networking/private-networking/) и [конфигурацию приложений](https://fly.io/docs/reference/configuration/).
+
+### Миграция повторяется и деплой остаётся в ожидании
+
+Если в `migrate` повторяется `Better Auth and application schema are ready.`, проверьте, что загруженная в Coolify версия Compose содержит у сервиса `migrate` настройки `restart: "no"` и `exclude_from_hc: true`. Миграции должны выполнить команду один раз и завершиться с кодом 0; API ждёт именно этого завершения. Отсутствующие таблицы при самом первом запуске до выполнения миграций могут сопровождаться диагностикой Better Auth; проверяйте итоговый код завершения.
+
+`exclude_from_hc` — расширение Coolify: он удаляет поле перед передачей Compose в Docker. Для обычного Docker Compose используйте `compose.yml`, где этого поля нет.

@@ -84,6 +84,8 @@ services:
     volumes: [speech-models:/models]
     restart: unless-stopped
   migrate:
+    restart: "no"
+    exclude_from_hc: true
     build: {context: ., dockerfile: apps/api/Dockerfile}
     environment: *api-env
     command: ['node', 'dist/cli.js', 'migrate']

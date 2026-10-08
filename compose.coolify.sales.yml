@@ -67,6 +67,8 @@ services:
     volumes: [speech-models:/models]
     restart: unless-stopped
   migrate:
+    restart: "no"
+    exclude_from_hc: true
     mem_limit: 384m
     build: {context: ., dockerfile: apps/api/Dockerfile, args: {NODE_BUILD_OPTIONS: --max-old-space-size=768}}
     environment:
