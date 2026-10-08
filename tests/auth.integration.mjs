@@ -276,6 +276,33 @@ try {
   assert.equal(await wsStatus(b.id, staff), 401);
   assert.equal(await wsStatus(a.id, ''), 401);
   assert.equal(await wsStatus(a.id, staff, 'https://untrusted.example'), 401);
+  await new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/live?conversationId=${a.id}`, {
+      headers: { Cookie: staff, Origin: origin },
+    });
+    const received = [];
+    const timer = setTimeout(() => {
+      ws.terminate();
+      reject(new Error('Late audio frame check timed out'));
+    }, 3000);
+    ws.on('message', (data) => received.push(JSON.parse(data.toString())));
+    ws.on('error', reject);
+    ws.on('open', () => {
+      // Simulate PCM arriving after the upstream channel has been closed.
+      ws.send(Buffer.alloc(3200));
+      ws.ping();
+    });
+    ws.once('pong', () => {
+      clearTimeout(timer);
+      ws.close();
+      try {
+        assert.equal(received.some((event) => event.type === 'error'), false);
+        resolve();
+      } catch (error) {
+        reject(error);
+      }
+    });
+  });
   console.log(
     'PASS: PostgreSQL migration/bootstrap; password sign-in; no public sign-up; organization and role isolation; Origin checks; authorized/unauthorized WebSocket; grounded empty-base refusal; real-mode script publication without knowledge service; zero-token steps; role/tenant isolation for scripts.',
   );

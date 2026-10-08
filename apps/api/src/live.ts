@@ -125,9 +125,10 @@ export function setupLive(server: Server) {
         ws.on('message', async (data, binary) => {
           try {
             if (binary) {
-              if (draining) return;
-              if (!speech || speech.readyState !== WebSocket.OPEN)
-                throw new Error('Аудиоканал ещё не готов');
+              // PCM already in transit may arrive after enrollment or stop closes
+              // the upstream. Ignore it instead of replacing a successful result
+              // with an error. Upstream failures are reported by their own handlers.
+              if (draining || !speech || speech.readyState !== WebSocket.OPEN) return;
               const decoded = decodeAudioFrame(
                 Buffer.from(data as Buffer),
                 sequence,
