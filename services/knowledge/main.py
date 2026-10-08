@@ -14,7 +14,10 @@ from pydantic import BaseModel, Field
 
 TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
 WEAVIATE = os.getenv("WEAVIATE_URL", "http://weaviate:8080").rstrip("/")
-CLASS = "SuflerChunk"
+CLASS = os.getenv("WEAVIATE_CLASS", "SuflerChunk")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
+RERANK_ENABLED = os.getenv("RERANK_ENABLED", "true").lower() == "true"
+PARSER_MODE = os.getenv("PARSER_MODE", "docling")
 http = httpx.Client(timeout=90, headers={"Authorization": "Bearer " + os.getenv("WEAVIATE_API_KEY", "")})
 models = {}
 model_lock = threading.Lock()
@@ -51,11 +54,18 @@ async def lifespan(app):
     if len(TOKEN) < 32:
         raise RuntimeError("INTERNAL_SERVICE_TOKEN must have at least 32 characters")
     ensure_schema()
-    from sentence_transformers import SentenceTransformer, CrossEncoder
-    from docling.document_converter import DocumentConverter
-    models["embed"] = SentenceTransformer("BAAI/bge-m3", device="cpu")
-    models["rerank"] = CrossEncoder("BAAI/bge-reranker-v2-m3", max_length=1024, device="cpu")
-    models["parser"] = DocumentConverter()
+    import torch
+    torch.set_num_threads(int(os.getenv("KNOWLEDGE_TORCH_THREADS", "2")))
+    from sentence_transformers import SentenceTransformer
+    models["embed"] = SentenceTransformer(EMBEDDING_MODEL, device="cpu")
+    if RERANK_ENABLED:
+        from sentence_transformers import CrossEncoder
+        models["rerank"] = CrossEncoder("BAAI/bge-reranker-v2-m3", max_length=1024, device="cpu")
+    if PARSER_MODE == "docling":
+        from docling.document_converter import DocumentConverter
+        models["parser"] = DocumentConverter()
+    elif PARSER_MODE != "basic":
+        raise RuntimeError("PARSER_MODE must be docling or basic")
     yield
     http.close()
 
@@ -65,7 +75,39 @@ app = FastAPI(lifespan=lifespan, dependencies=[Depends(authorize)])
 
 @app.get("/health")
 def health():
-    return {"ok": bool(models), "embedding": "BAAI/bge-m3", "reranker": "BAAI/bge-reranker-v2-m3"}
+    return {"ok": bool(models), "embedding": EMBEDDING_MODEL, "reranker": "BAAI/bge-reranker-v2-m3" if RERANK_ENABLED else "disabled", "parser": PARSER_MODE}
+
+
+def embedding_text(text, *, query):
+    if EMBEDDING_MODEL.startswith("intfloat/multilingual-e5"):
+        return ("query: " if query else "passage: ") + text
+    return text
+
+
+def basic_extract(path):
+    if path.stat().st_size > 5 * 1024 * 1024:
+        raise HTTPException(413, "Basic parser supports files up to 5 MB")
+    if path.suffix == ".pdf":
+        from pypdf import PdfReader
+        reader = PdfReader(path)
+        if len(reader.pages) > 100:
+            raise HTTPException(413, "Basic parser supports up to 100 PDF pages")
+        parts = []
+        for page in reader.pages:
+            stream = page.get_contents()
+            if stream is not None and len(stream.get_data()) > 2 * 1024 * 1024:
+                raise HTTPException(413, "PDF page is too complex for the basic parser")
+            parts.append(page.extract_text() or "")
+        return "\n\n".join(parts)
+    import zipfile
+    with zipfile.ZipFile(path) as archive:
+        if sum(info.file_size for info in archive.infolist()) > 25 * 1024 * 1024:
+            raise HTTPException(413, "DOCX expanded content is too large")
+    from docx import Document
+    document = Document(path)
+    parts = [paragraph.text for paragraph in document.paragraphs]
+    parts.extend(" | ".join(cell.text for cell in row.cells) for table in document.tables for row in table.rows)
+    return "\n".join(parts)
 
 
 class ParseRequest(BaseModel):
@@ -88,10 +130,13 @@ def parse_file(payload: ParseRequest):
         path = Path(folder) / ("source" + suffix)
         path.write_bytes(data)
         with model_lock:
-            result = models["parser"].convert(path)
-        text = result.document.export_to_markdown()
+            if PARSER_MODE == "basic":
+                text = basic_extract(path)
+            else:
+                result = models["parser"].convert(path)
+                text = result.document.export_to_markdown()
         if not text.strip():
-            raise HTTPException(422, "No text extracted")
+            raise HTTPException(422, "No text extracted. Scanned files require external OCR in basic mode.")
         return {"text": text}
 
 
@@ -108,7 +153,7 @@ def index_document(payload: IndexRequest):
     if len(blocks) > 2000:
         raise HTTPException(400, "Too many chunks")
     with model_lock:
-        vectors = models["embed"].encode([b["text"] for b in blocks], normalize_embeddings=True).tolist()
+        vectors = models["embed"].encode([embedding_text(b["text"], query=False) for b in blocks], normalize_embeddings=True, batch_size=int(os.getenv("EMBEDDING_BATCH_SIZE", "16"))).tolist()
     objects = [{"class": CLASS, "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f'{doc["orgId"]}:{doc["id"]}:{doc["version"]}:{b["id"]}')),
         "properties": {"orgId": doc["orgId"], "documentId": doc["id"], "blockId": b["id"], "version": doc["version"],
             "region": doc["region"], "title": doc["title"], "text": b["text"]}, "vector": vector}
@@ -138,15 +183,19 @@ def search(payload: SearchRequest):
     version_filters = ['{operator:And,operands:[' + eq("documentId", v["id"]) + ',' + eq("version", v["version"], True) + ']}' for v in payload.versions]
     where = '{operator:And,operands:[' + eq("orgId", payload.orgId) + ',{operator:Or,operands:[' + ','.join(version_filters) + ']},{operator:Or,operands:[' + eq("region", "Все регионы") + ',' + eq("region", payload.region) + ']}]}'
     with model_lock:
-        vector = models["embed"].encode(payload.query, normalize_embeddings=True).tolist()
-    query = '{Get{' + CLASS + '(hybrid:{query:' + json.dumps(payload.query) + ',vector:' + json.dumps(vector) + ',alpha:0.5},where:' + where + ',limit:20){documentId blockId version title text}}}'
+        vector = models["embed"].encode(embedding_text(payload.query, query=True), normalize_embeddings=True).tolist()
+    query = '{Get{' + CLASS + '(hybrid:{query:' + json.dumps(payload.query) + ',vector:' + json.dumps(vector) + ',alpha:0.5},where:' + where + ',limit:20){documentId blockId version title text _additional{score}}}}'
     result = request("POST", "/v1/graphql", json={"query": query})
     if result.get("errors"):
         raise HTTPException(502, "Hybrid retrieval failed")
     candidates = result.get("data", {}).get("Get", {}).get(CLASS, [])
     if not candidates:
         return {"results": []}
-    with model_lock:
-        scores = models["rerank"].predict([(payload.query, item["text"]) for item in candidates])
-    ranked = sorted(zip(candidates, scores), key=lambda pair: float(pair[1]), reverse=True)[:5]
+    if RERANK_ENABLED:
+        with model_lock:
+            scores = models["rerank"].predict([(payload.query, item["text"]) for item in candidates])
+        ranked = sorted(zip(candidates, scores), key=lambda pair: float(pair[1]), reverse=True)[:5]
+    else:
+        # Keep Weaviate's hybrid ordering; no invented semantic confidence score.
+        ranked = [(item, float(item.get("_additional", {}).get("score") or 0)) for item in candidates[:5]]
     return {"results": [{"documentId": item["documentId"], "blockId": item["blockId"], "version": item["version"], "score": float(score)} for item, score in ranked]}

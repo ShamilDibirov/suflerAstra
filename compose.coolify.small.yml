@@ -1,0 +1,141 @@
+# Small CPU pilot for 4 vCPU / 8 GB; one audio session, compact RAG, no OCR.
+x-api-env: &api-env
+  DEMO_MODE: 'false'
+  RETENTION_DAYS: ${RETENTION_DAYS:-7}
+  AUDIO_RECORDING_ENABLED: ${AUDIO_RECORDING_ENABLED:-false}
+  APP_ORIGIN: ${APP_ORIGIN:?Set HTTPS APP_ORIGIN}
+  DATABASE_URL: postgresql://sufler:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/sufler
+  REDIS_URL: redis://redis:6379
+  BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?Set BETTER_AUTH_SECRET}
+  INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+  OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+  KEV_MODEL: ${KEV_MODEL:-jaredpalmer/kev-4b}
+  CLASSIFIER_FALLBACK_MODEL: ${CLASSIFIER_FALLBACK_MODEL:-qwen/qwen3.5-9b}
+  KEV_CONFIDENCE_THRESHOLD: ${KEV_CONFIDENCE_THRESHOLD:-0.85}
+  SPEECH_URL: http://speech:8001
+  KNOWLEDGE_URL: http://knowledge:8002
+  S3_ENDPOINT: http://garage:3900
+  S3_REGION: garage
+  S3_BUCKET: sufler
+  S3_ACCESS_KEY: ${S3_ACCESS_KEY:?Set S3_ACCESS_KEY}
+  S3_SECRET_KEY: ${S3_SECRET_KEY:?Set S3_SECRET_KEY}
+  S3_FORCE_PATH_STYLE: 'true'
+services:
+  postgres:
+    mem_limit: 192m
+    command: ['postgres', '-c', 'shared_buffers=32MB', '-c', 'max_connections=30']
+    image: postgres:17-alpine
+    environment: {POSTGRES_DB: sufler, POSTGRES_USER: sufler, POSTGRES_PASSWORD: '${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}'}
+    volumes: [postgres:/var/lib/postgresql/data]
+    healthcheck: {test: ['CMD-SHELL', 'pg_isready -U sufler'], interval: 5s, timeout: 3s, retries: 20}
+    restart: unless-stopped
+  redis:
+    mem_limit: 96m
+    image: redis:7.4-alpine
+    command: redis-server --appendonly yes --maxmemory 64mb --maxmemory-policy noeviction
+    volumes: [redis:/data]
+    healthcheck: {test: ['CMD', 'redis-cli', 'ping'], interval: 5s, timeout: 3s, retries: 20}
+    restart: unless-stopped
+  garage:
+    mem_limit: 128m
+    build: {context: ., dockerfile: deploy/Dockerfile.garage}
+    command: ['/garage', 'server', '--single-node', '--default-bucket']
+    environment:
+      GARAGE_RPC_SECRET: ${GARAGE_RPC_SECRET:?Set GARAGE_RPC_SECRET}
+      GARAGE_ALLOW_WORLD_READABLE_SECRETS: 'true'
+      GARAGE_DEFAULT_ACCESS_KEY: ${S3_ACCESS_KEY}
+      GARAGE_DEFAULT_SECRET_KEY: ${S3_SECRET_KEY}
+      GARAGE_DEFAULT_BUCKET: sufler
+    volumes: [garage-meta:/var/lib/garage/meta, garage-data:/var/lib/garage/data]
+    healthcheck: {test: ['CMD', '/garage', 'stats', '-a'], interval: 5s, timeout: 5s, retries: 30}
+    restart: unless-stopped
+  weaviate:
+    mem_limit: 384m
+    image: cr.weaviate.io/semitechnologies/weaviate:1.39.8
+    environment:
+      GOMEMLIMIT: 256MiB
+      GOMAXPROCS: '1'
+      QUERY_DEFAULTS_LIMIT: '20'
+      PERSISTENCE_DATA_PATH: /var/lib/weaviate
+      DEFAULT_VECTORIZER_MODULE: none
+      CLUSTER_HOSTNAME: node1
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: 'false'
+      AUTHENTICATION_APIKEY_ENABLED: 'true'
+      AUTHENTICATION_APIKEY_ALLOWED_KEYS: ${WEAVIATE_API_KEY:?Set WEAVIATE_API_KEY}
+      AUTHENTICATION_APIKEY_USERS: sufler
+      AUTHORIZATION_ENABLE_RBAC: 'true'
+      AUTHORIZATION_RBAC_ROOT_USERS: sufler
+    volumes: [vectors:/var/lib/weaviate]
+    restart: unless-stopped
+  knowledge:
+    mem_limit: 1536m
+    platform: linux/amd64
+    build: {context: ., dockerfile: services/knowledge/Dockerfile.small}
+    environment:
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN}
+      EMBEDDING_MODEL: intfloat/multilingual-e5-small
+      WEAVIATE_CLASS: SuflerChunkSmall
+      RERANK_ENABLED: 'false'
+      PARSER_MODE: basic
+      EMBEDDING_BATCH_SIZE: '4'
+      KNOWLEDGE_TORCH_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+      WEAVIATE_URL: http://weaviate:8080
+      WEAVIATE_API_KEY: ${WEAVIATE_API_KEY}
+    command: ['uvicorn', 'main:app', '--host', '0.0.0.0', '--port', '8002', '--no-access-log']
+    volumes: [knowledge-models:/models]
+    depends_on: [weaviate]
+    restart: unless-stopped
+  speech:
+    mem_limit: 1536m
+    platform: linux/amd64
+    build: {context: ., dockerfile: services/speech/Dockerfile}
+    environment:
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      HF_TOKEN: ${HF_TOKEN:-}
+      STAFF_SIMILARITY_THRESHOLD: ${STAFF_SIMILARITY_THRESHOLD:-0.65}
+      SPEECH_MAX_SESSIONS: ${SPEECH_MAX_SESSIONS:-1}
+      SPEECH_DEVICE: cpu
+      TORCH_THREADS: ${TORCH_THREADS:-2}
+    command: ['uvicorn', 'main:app', '--host', '0.0.0.0', '--port', '8001', '--no-access-log']
+    volumes: [speech-models:/models]
+    restart: unless-stopped
+  migrate:
+    mem_limit: 384m
+    build: {context: ., dockerfile: apps/api/Dockerfile, args: {NODE_BUILD_OPTIONS: --max-old-space-size=768}}
+    environment:
+      <<: *api-env
+      NODE_OPTIONS: --max-old-space-size=256
+    command: ['node', 'dist/cli.js', 'migrate']
+    depends_on: {postgres: {condition: service_healthy}}
+  api:
+    mem_limit: 384m
+    build: {context: ., dockerfile: apps/api/Dockerfile, args: {NODE_BUILD_OPTIONS: --max-old-space-size=768}}
+    environment:
+      <<: *api-env
+      NODE_OPTIONS: --max-old-space-size=256
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      garage: {condition: service_healthy}
+    restart: unless-stopped
+  web:
+    mem_limit: 256m
+    environment: {NODE_OPTIONS: --max-old-space-size=192}
+    build: {context: ., dockerfile: apps/web/Dockerfile, args: {NODE_BUILD_OPTIONS: --max-old-space-size=1024}}
+    restart: unless-stopped
+  gateway:
+    mem_limit: 64m
+    build: {context: ., dockerfile: deploy/Dockerfile.gateway}
+    expose: ['8080']
+    depends_on: [api, web]
+    restart: unless-stopped
+volumes:
+  postgres:
+  redis:
+  garage-meta:
+  garage-data:
+  vectors:
+  speech-models:
+  knowledge-models:

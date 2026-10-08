@@ -49,4 +49,8 @@ assert {(r["documentId"], r["version"]) for r in results} == {("global", 2), ("m
 assert len(results) == 2, results  # Same IDs in another organization must not produce duplicates.
 assert main.search(main.SearchRequest(orgId="missing", query="SIM", versions=payload.versions))["results"] == []
 assert main.search(main.SearchRequest(orgId="a", query="SIM", versions=[]))["results"] == []
-print("PASS: real Weaviate schema, batch indexing, hybrid query, organization/version/region filters; deterministic test vectors.")
+main.RERANK_ENABLED = False
+results_without_reranker = main.search(payload)["results"]
+assert {(r["documentId"], r["version"]) for r in results_without_reranker} == {("global", 2), ("moscow", 1)}, results_without_reranker
+assert main.search(main.SearchRequest(orgId="missing", query="SIM", versions=payload.versions))["results"] == []
+print("PASS: reranked and lightweight hybrid retrieval; real Weaviate schema, batch indexing, hybrid query, organization/version/region filters; deterministic test vectors.")

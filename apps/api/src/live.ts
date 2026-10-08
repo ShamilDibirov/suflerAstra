@@ -145,7 +145,7 @@ export function setupLive(server: Server) {
               if (speech.bufferedAmount > 32000 * 3)
                 throw new Error('Обработка отстаёт. Запись приостановлена');
               speech.send(frame);
-              if (!enrolling) {
+              if (!enrolling && config.recordAudio) {
                 raw.push(frame);
                 bytes += frame.length;
                 if (bytes >= 32000 * 30) flush();

@@ -15,9 +15,16 @@ export const config = {
   internalToken: process.env.INTERNAL_SERVICE_TOKEN || '',
   weaviate: process.env.WEAVIATE_URL || 'http://127.0.0.1:8080',
   bucket: process.env.S3_BUCKET || 'sufler',
-  retentionDays: 30,
+  retentionDays: Number(process.env.RETENTION_DAYS || 30),
+  recordAudio: process.env.AUDIO_RECORDING_ENABLED !== 'false',
 };
 export function validateConfig() {
+  if (
+    !Number.isInteger(config.retentionDays) ||
+    config.retentionDays < 1 ||
+    config.retentionDays > 30
+  )
+    throw new Error('RETENTION_DAYS must be an integer from 1 to 30');
   if (
     !config.demo &&
     (!config.database ||

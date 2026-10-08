@@ -4,6 +4,7 @@ import type { Conversation, SessionUser, KnowledgeDocument } from '../packages/s
 import { SegmentSchema, PatchSchema, MODEL_DEFAULTS } from '../packages/shared/src/index';
 import { demoDocuments } from '../packages/shared/src/demo';
 import { store } from '../apps/api/src/store';
+import { config } from '../apps/api/src/config';
 import { assertAdmin } from '../apps/api/src/auth';
 import {
   createConversation,
@@ -203,6 +204,23 @@ describe('server authorization and asynchronous state', () => {
     expect(await store.get(user.orgId, 'conversation', c.id)).toBeNull();
     expect(await store.list(user.orgId, 'usage')).toEqual([]);
     expect(await store.list(user.orgId, 'revision')).toEqual([]);
+  });
+  it('applies the seven-day pilot retention without deleting recent conversations', async () => {
+    const previous = config.retentionDays;
+    config.retentionDays = 7;
+    try {
+      const old = await createConversation(user);
+      old.createdAt = new Date(Date.now() - 8 * 86400000).toISOString();
+      await store.put(user.orgId, 'conversation', old.id, old);
+      const recent = await createConversation({ ...user, id: randomUUID() });
+      recent.createdAt = new Date(Date.now() - 6 * 86400000).toISOString();
+      await store.put(user.orgId, 'conversation', recent.id, recent);
+      await retention();
+      expect(await store.get(user.orgId, 'conversation', old.id)).toBeNull();
+      expect(await store.get(user.orgId, 'conversation', recent.id)).not.toBeNull();
+    } finally {
+      config.retentionDays = previous;
+    }
   });
   it('enforces a total limit of ten even under concurrent creation', async () => {
     const results = await Promise.allSettled(

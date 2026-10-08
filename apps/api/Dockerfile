@@ -1,4 +1,6 @@
 FROM node:24-bookworm-slim AS build
+ARG NODE_BUILD_OPTIONS=""
+ENV NODE_OPTIONS=${NODE_BUILD_OPTIONS}
 WORKDIR /workspace
 RUN npm install -g pnpm@9.15.1
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
