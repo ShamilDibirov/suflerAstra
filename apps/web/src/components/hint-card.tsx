@@ -17,7 +17,9 @@ export function HintCard({
   onChat,
   onSource,
   onComplete,
+  emptyMessage,
 }: {
+  emptyMessage?: string;
   hint: Hint | undefined;
   busy: boolean;
   onHint: () => void;
@@ -56,10 +58,10 @@ export function HintCard({
         </>
       ) : (
         <div className="hint-empty">
-          <h2 className="hint-title">Всё готово к хорошему разговору</h2>
+          <h2 className="hint-title">Ожидаем следующий шаг</h2>
           <p className="hint-body">
-            Начните консультацию. Суфлёр заметит запрос клиента и найдёт следующий шаг в вашей базе
-            знаний.
+            {emptyMessage ||
+              'Начните консультацию. Подсказка появится, когда в опубликованной базе найдётся подтверждённый следующий шаг.'}
           </p>
         </div>
       )}

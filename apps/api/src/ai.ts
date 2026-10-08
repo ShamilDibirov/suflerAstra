@@ -39,6 +39,7 @@ export async function classify(
   docs: KnowledgeDocument[],
   signal: AbortSignal,
   mode: 'pipeline' | 'kev' | 'qwen' = 'pipeline',
+  onFallback?: (reason: string) => void,
 ): Promise<{
   patch: ConversationStatePatch;
   source: 'kev' | 'qwen' | 'demo';
@@ -191,6 +192,7 @@ export async function classify(
     };
   } catch (error) {
     if (signal.aborted || mode === 'kev') throw error;
+    onFallback?.(providerError(error));
     const result = await generateText({
       model: model(config.fallback),
       output: Output.object({ schema: PatchSchema }),
@@ -283,6 +285,25 @@ export async function selectEvidence(
     inputTokens: r.usage.inputTokens ?? 0,
     outputTokens: r.usage.outputTokens ?? 0,
   };
+}
+export function providerError(error: unknown): string {
+  const value = error as { statusCode?: number; message?: string; cause?: unknown; name?: string };
+  const status = value?.statusCode;
+  const message = value?.message || '';
+  if (status === 403 || /Forbidden|HTTP 403/i.test(message))
+    return 'OpenRouter: HTTP 403 — доступ запрещён. Проверьте ограничения аккаунта, ключа и доступ к API с сервера.';
+  if (status === 401 || /HTTP 401/i.test(message))
+    return 'OpenRouter: HTTP 401 — проверьте API-ключ.';
+  if (status === 402 || /HTTP 402/i.test(message))
+    return 'OpenRouter: HTTP 402 — недостаточно средств или превышен бюджет ключа.';
+  if (status === 429 || /HTTP 429/i.test(message))
+    return 'OpenRouter: HTTP 429 — лимит запросов. Повторите позже.';
+  if (/Нет ключа|OPENROUTER_API_KEY/.test(message))
+    return 'Добавьте OPENROUTER_API_KEY в runtime env и пересоздайте API.';
+  if (value?.name === 'TimeoutError' || /timeout|timed out/i.test(message))
+    return 'Провайдер не ответил вовремя. Повторите запрос.';
+  if (value?.cause && value.cause !== error) return providerError(value.cause);
+  return 'AI-запрос не выполнен. Проверьте подключение и поддержку структурированного ответа моделью.';
 }
 export async function testModel(id: string) {
   if (config.demo) return { ok: true, demo: true, message: 'Деморежим: реальный API не вызывался' };

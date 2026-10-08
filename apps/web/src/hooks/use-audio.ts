@@ -7,7 +7,10 @@ export function useAudio(conversationId: string | undefined, onEvent: (event: Ap
     [devices, setDevices] = useState<MediaDeviceInfo[]>([]),
     [deviceId, setDeviceId] = useState(''),
     [level, setLevel] = useState(0),
-    [enrolled, setEnrolled] = useState(false);
+    [enrolled, setEnrolled] = useState(false),
+    [draining, setDraining] = useState(false);
+  const paused = useRef(false);
+  const captureEpoch = useRef(0);
   const socket = useRef<WebSocket | null>(null),
     stream = useRef<MediaStream | null>(null),
     context = useRef<AudioContext | null>(null),
@@ -23,6 +26,8 @@ export function useAudio(conversationId: string | undefined, onEvent: (event: Ap
     setLevel(0);
   };
   useEffect(() => {
+    captureEpoch.current++;
+    setDraining(false);
     setStatus('stopped');
     if (!conversationId) return;
     const ws = new WebSocket(socketUrl(conversationId));
@@ -31,7 +36,12 @@ export function useAudio(conversationId: string | undefined, onEvent: (event: Ap
       const event = JSON.parse(e.data) as AppEvent;
       if (event.type === 'audio.status') {
         const s = event.data as { status: string };
-        setStatus(s.status);
+        setStatus(
+          paused.current && ['listening', 'enrolling', 'finishing', 'stopped'].includes(s.status)
+            ? 'paused'
+            : s.status,
+        );
+        if (s.status === 'stopped') setDraining(false);
         if (s.status === 'enrolled') {
           setEnrolled(true);
           cleanup();
@@ -39,12 +49,14 @@ export function useAudio(conversationId: string | undefined, onEvent: (event: Ap
         if (['stopped', 'demo', 'finishing'].includes(s.status)) cleanup();
       }
       if (event.type === 'error') {
+        setDraining(false);
         cleanup();
         setStatus('stopped');
       }
       eventRef.current(event);
     };
     ws.onerror = () => {
+      setDraining(false);
       setStatus('stopped');
       cleanup();
       eventRef.current({
@@ -53,6 +65,7 @@ export function useAudio(conversationId: string | undefined, onEvent: (event: Ap
       });
     };
     ws.onclose = () => {
+      setDraining(false);
       cleanup();
       setStatus('stopped');
     };
@@ -75,6 +88,9 @@ export function useAudio(conversationId: string | undefined, onEvent: (event: Ap
       return;
     }
     try {
+      if (draining) return;
+      const epoch = ++captureEpoch.current;
+      paused.current = false;
       setStatus('connecting');
       const capture = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -86,12 +102,22 @@ export function useAudio(conversationId: string | undefined, onEvent: (event: Ap
         },
         video: false,
       });
+      if (paused.current || epoch !== captureEpoch.current) {
+        capture.getTracks().forEach((track) => track.stop());
+        setDraining(false);
+        return;
+      }
       stream.current = capture;
       await refreshDevices();
       const ctx = new AudioContext();
       context.current = ctx;
       await ctx.audioWorklet.addModule('/audio-worklet.js');
       await ctx.resume();
+      if (paused.current || epoch !== captureEpoch.current) {
+        cleanup();
+        setDraining(false);
+        return;
+      }
       const source = ctx.createMediaStreamSource(capture),
         worklet = new AudioWorkletNode(ctx, 'pcm-processor'),
         mute = ctx.createGain();
@@ -120,7 +146,7 @@ export function useAudio(conversationId: string | undefined, onEvent: (event: Ap
         let sum = 0;
         for (const v of samples) sum += v * v;
         setLevel(Math.min(1, Math.sqrt(sum / samples.length) / 7000));
-        if (ready && ws.readyState === WebSocket.OPEN) {
+        if (!paused.current && ready && ws.readyState === WebSocket.OPEN) {
           if (ws.bufferedAmount > 64000) {
             stop();
             eventRef.current({
@@ -145,12 +171,15 @@ export function useAudio(conversationId: string | undefined, onEvent: (event: Ap
     }
   }
   function stop() {
+    captureEpoch.current++;
+    paused.current = true;
+    setDraining(['connecting', 'listening', 'enrolling'].includes(status));
     socket.current?.readyState === WebSocket.OPEN &&
       socket.current.send(JSON.stringify({ type: 'audio.stop' }));
     cleanup();
-    setStatus('finishing');
+    setStatus('paused');
   }
-  function assign(speakerId: string, role: 'customer' | 'bystander') {
+  function assign(speakerId: string, role: 'customer' | 'consultant' | 'bystander') {
     socket.current?.send(JSON.stringify({ type: 'audio.assign', speakerId, role }));
   }
   return {
@@ -160,6 +189,7 @@ export function useAudio(conversationId: string | undefined, onEvent: (event: Ap
     setDeviceId,
     level,
     enrolled,
+    draining,
     start,
     stop,
     assign,

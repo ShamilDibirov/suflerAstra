@@ -43,7 +43,7 @@ import {
   cancel,
 } from './conversations';
 import { saveDocument, publishDocument, addSalesTemplates } from './knowledge';
-import { draftProcess, testModel } from './ai';
+import { draftProcess, testModel, providerError } from './ai';
 import { putFile, getFile } from './storage';
 import { enqueueIngest, deleteConversation } from './infra';
 import { fromNodeHeaders } from 'better-auth/node';
@@ -369,11 +369,9 @@ export class ApiController {
     } catch (e) {
       await store.put(user.orgId, 'model', id, {
         ...m,
-        testError: e instanceof Error ? e.message : 'Ошибка',
+        testError: providerError(e),
       });
-      throw new BadRequestException(
-        'Модель недоступна или не поддерживает структурированный ответ',
-      );
+      throw new BadRequestException(providerError(e));
     }
   }
   @Get('admin/history') async history(@Req() req: Request) {

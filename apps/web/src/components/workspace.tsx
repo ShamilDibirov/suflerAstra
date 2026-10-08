@@ -75,6 +75,7 @@ export function Workspace() {
   const [pip, setPip] = useState<Window | null>(null),
     [partial, setPartial] = useState(''),
     [boundary, setBoundary] = useState<{ text: string; speakerId: string } | null>(null),
+    [contextStatus, setContextStatus] = useState(''),
     [editingCard, setEditingCard] = useState(false),
     [cardIntent, setCardIntent] = useState(''),
     [cardLabel, setCardLabel] = useState(''),
@@ -102,7 +103,13 @@ export function Workspace() {
       }
       if (event.type === 'transcript.partial') setPartial((event.data as { text: string }).text);
       if (event.type === 'session.boundary')
-        setBoundary(event.data as { text: string; speakerId: string });
+        setBoundary((current) =>
+          current?.speakerId === (event.data as { speakerId: string }).speakerId
+            ? current
+            : (event.data as { text: string; speakerId: string }),
+        );
+      if (event.type === 'context.status' && event.conversationId === conversationRef.current?.id)
+        setContextStatus((event.data as { message: string }).message);
       if (event.type === 'error') {
         setError(String(event.data));
         setPartial('');
@@ -168,6 +175,8 @@ export function Workspace() {
   async function newClient() {
     audio.stop();
     setPartial('');
+    setBoundary(null);
+    setContextStatus('');
     const created = await post<Conversation>('/conversations', { modelId: conversation?.modelId });
     const mode = conversation?.assistanceMode;
     setConversation(
@@ -270,6 +279,13 @@ export function Workspace() {
   const Hint = (
     <HintCard
       hint={currentHint}
+      emptyMessage={
+        conversation?.error ||
+        ((conversation?.assistanceMode || runtime.defaultAssistanceMode) === 'scripts' &&
+        !conversation?.salesScriptId
+          ? 'Выберите опубликованный скрипт продаж выше. Следующий шаг появится без обращения к LLM.'
+          : undefined)
+      }
       busy={busy}
       onHint={() => void hint()}
       onChat={() => {
@@ -373,15 +389,17 @@ export function Workspace() {
               </span>
               <div className="audio-copy">
                 <strong>
-                  {audio.status === 'finishing'
-                    ? 'Обрабатываем последние реплики…'
-                    : audio.status === 'enrolling'
-                      ? 'Знакомимся с вашим голосом…'
-                      : audio.status === 'listening'
-                        ? 'Суфлёр слушает разговор'
-                        : audio.status === 'connecting'
-                          ? 'Подключаем микрофон…'
-                          : 'Микрофон выключен'}
+                  {audio.status === 'paused'
+                    ? 'Микрофон на паузе'
+                    : audio.status === 'finishing'
+                      ? 'Обрабатываем последние реплики…'
+                      : audio.status === 'enrolling'
+                        ? 'Знакомимся с вашим голосом…'
+                        : audio.status === 'listening'
+                          ? 'Суфлёр слушает разговор'
+                          : audio.status === 'connecting'
+                            ? 'Подключаем микрофон…'
+                            : 'Микрофон выключен'}
                 </strong>
                 <small>
                   {live
@@ -405,6 +423,7 @@ export function Workspace() {
                 ))}
               </span>
               <Button
+                disabled={audio.draining && !live}
                 variant={live ? 'secondary' : 'outline'}
                 onClick={() => {
                   if (user.demo) {
@@ -416,7 +435,14 @@ export function Workspace() {
                   live ? audio.stop() : void audio.start();
                 }}
               >
-                {live ? <Pause size={13} /> : <Mic size={13} />} {live ? 'Пауза' : 'Включить'}
+                {live ? <Pause size={13} /> : <Mic size={13} />}{' '}
+                {live
+                  ? 'Пауза'
+                  : audio.draining
+                    ? 'Завершаем обработку…'
+                    : audio.status === 'paused'
+                      ? 'Продолжить'
+                      : 'Включить'}
               </Button>
               <button
                 className="icon-btn"
@@ -500,6 +526,84 @@ export function Workspace() {
                 </span>
               </div>
             </div>
+            {boundary && (
+              <section
+                className="panel speaker-notice"
+                aria-label="Назначить новый голос"
+                style={{ margin: '16px 0', padding: 20 }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                  <div>
+                    <strong>Неизвестный голос</strong>
+                    <p className="muted">Эта реплика пока вне контекста. Запись продолжается.</p>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    onClick={() => {
+                      audio.assign(boundary.speakerId, 'bystander');
+                      setBoundary(null);
+                    }}
+                  >
+                    Не учитывать
+                  </Button>
+                </div>
+                <p className="source-quote">{boundary?.text}</p>
+                <div className="form-actions" style={{ flexWrap: 'wrap' }}>
+                  <Button
+                    variant="ghost"
+                    onClick={() => {
+                      if (boundary) audio.assign(boundary.speakerId, 'bystander');
+                      setBoundary(null);
+                    }}
+                  >
+                    Посторонний
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      audio.assign(boundary.speakerId, 'consultant');
+                      setBoundary(null);
+                    }}
+                  >
+                    Это мой голос
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() =>
+                      void run(async () => {
+                        if (boundary && conversation) {
+                          audio.assign(boundary.speakerId, 'customer');
+                          setBoundary(null);
+                        }
+                      })
+                    }
+                  >
+                    Текущий клиент
+                  </Button>
+                  <Button
+                    onClick={() =>
+                      void run(async () => {
+                        if (boundary) {
+                          audio.stop();
+                          const c = await post<Conversation>('/conversations', {
+                            modelId: conversation?.modelId,
+                          });
+                          setConversation(
+                            await post<Conversation>(`/conversations/${c.id}/segments`, {
+                              text: boundary.text,
+                              role: 'customer',
+                            }),
+                          );
+                          setBoundary(null);
+                        }
+                      })
+                    }
+                  >
+                    Новый клиент
+                  </Button>
+                </div>
+              </section>
+            )}
             <div className="transcript-list">
               {!conversation?.segments.length && (
                 <div className="empty-state" style={{ padding: 15 }}>
@@ -534,7 +638,9 @@ export function Workspace() {
                 </div>
               ))}
               {partial && (
-                <p className="muted" style={{ fontSize: 12, fontStyle: 'italic' }}>
+                <p aria-live="polite" style={{ fontSize: 15 }}>
+                  <span className="muted">Сейчас говорят · предварительный текст</span>
+                  <br />
                   {partial}
                 </p>
               )}
@@ -640,15 +746,23 @@ export function Workspace() {
                 </div>
               ) : null}
             </div>
+            {conversation?.error && (
+              <div className="context-note" role="status">
+                Контекст не обновлён: {conversation.error}
+              </div>
+            )}
             <div className="context-footer">
               <Sparkles size={12} />
-              {card?.classificationSource === 'demo'
-                ? 'Учебная классификация'
-                : card?.classificationSource === 'manual'
-                  ? 'Уточнено консультантом'
-                  : card?.classificationSource === 'qwen'
-                    ? 'Контекст · резервный Qwen'
-                    : 'Контекст обновляет KEV 4B'}
+              {contextStatus ||
+                (card?.classificationSource === 'demo'
+                  ? 'Учебная классификация'
+                  : card?.classificationSource === 'manual'
+                    ? 'Уточнено консультантом'
+                    : card?.classificationSource === 'qwen'
+                      ? 'Контекст · резервный Qwen'
+                      : card?.classificationSource === 'kev'
+                        ? 'Контекст обновлён · KEV 4B'
+                        : 'KEV ещё не определил контекст')}
               <span style={{ marginLeft: 'auto' }}>v{card?.revision || 0}</span>
             </div>
           </section>
@@ -825,63 +939,6 @@ export function Workspace() {
             }
           >
             Обновить карточку
-          </Button>
-        </div>
-      </Dialog>
-      <Dialog
-        open={!!boundary}
-        onOpenChange={(v) => !v && setBoundary(null)}
-        title="К разговору подключился новый голос"
-        description="Суфлёр пока не включает его реплику в контекст"
-      >
-        <p className="source-quote">{boundary?.text}</p>
-        <div className="form-actions" style={{ flexWrap: 'wrap' }}>
-          <Button
-            variant="ghost"
-            onClick={() => {
-              if (boundary) audio.assign(boundary.speakerId, 'bystander');
-              setBoundary(null);
-            }}
-          >
-            Посторонний
-          </Button>
-          <Button
-            variant="outline"
-            onClick={() =>
-              void run(async () => {
-                if (boundary && conversation) {
-                  audio.assign(boundary.speakerId, 'customer');
-                  await post(`/conversations/${conversation.id}/segments`, {
-                    text: boundary.text,
-                    role: 'customer',
-                  });
-                  setBoundary(null);
-                }
-              })
-            }
-          >
-            Текущий клиент
-          </Button>
-          <Button
-            onClick={() =>
-              void run(async () => {
-                if (boundary) {
-                  audio.stop();
-                  const c = await post<Conversation>('/conversations', {
-                    modelId: conversation?.modelId,
-                  });
-                  setConversation(
-                    await post<Conversation>(`/conversations/${c.id}/segments`, {
-                      text: boundary.text,
-                      role: 'customer',
-                    }),
-                  );
-                  setBoundary(null);
-                }
-              })
-            }
-          >
-            Новый клиент
           </Button>
         </div>
       </Dialog>

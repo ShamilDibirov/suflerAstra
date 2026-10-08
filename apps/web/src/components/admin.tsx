@@ -558,9 +558,9 @@ export function Admin({ section }: { section: string }) {
       {section === 'models' && (
         <>
           <div className="info-banner">
-            <strong>KEV 4B ведёт контекст.</strong> Модель ниже отвечает за подсказки и чат. Смена
-            модели сохраняет карточку клиента. Резервный классификатор настраивается на сервере
-            отдельно.
+            <strong>Классификатор контекста — KEV 4B.</strong> Его фактический статус показан в
+            карточке диалога. Модель ниже отвечает за подсказки и чат. Смена модели сохраняет
+            карточку клиента. Резервный классификатор настраивается на сервере отдельно.
           </div>
           <div className="model-grid">
             {models.map((m) => (
@@ -595,7 +595,9 @@ export function Admin({ section }: { section: string }) {
                     disabled={busy}
                     onClick={() =>
                       void run(async () => {
-                        const r = await post<{ demo: boolean }>('/admin/models/test', { id: m.id });
+                        const r = await post<{ demo: boolean }>('/admin/models/test', {
+                          id: m.id,
+                        }).finally(() => load());
                         notify(
                           r.demo
                             ? 'Деморежим: реальный API не вызывался'

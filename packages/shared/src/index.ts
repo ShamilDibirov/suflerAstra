@@ -188,6 +188,7 @@ export interface AppEvent {
   type:
     | 'conversation.updated'
     | 'transcript.partial'
+    | 'context.status'
     | 'audio.status'
     | 'session.boundary'
     | 'error';

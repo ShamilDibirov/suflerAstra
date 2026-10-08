@@ -288,15 +288,22 @@ try {
     ws.on('message', (data) => received.push(JSON.parse(data.toString())));
     ws.on('error', reject);
     ws.on('open', () => {
+      // Pausing during the async start must cancel the pending upstream connection.
+      ws.send(JSON.stringify({ type: 'audio.start', mode: 'listen' }));
+      ws.send(JSON.stringify({ type: 'audio.stop' }));
       // Simulate PCM arriving after the upstream channel has been closed.
       ws.send(Buffer.alloc(3200));
       ws.ping();
     });
-    ws.once('pong', () => {
+    ws.once('pong', async () => {
+      await pause(250);
       clearTimeout(timer);
       ws.close();
       try {
-        assert.equal(received.some((event) => event.type === 'error'), false);
+        assert.equal(
+          received.some((event) => event.type === 'error'),
+          false,
+        );
         resolve();
       } catch (error) {
         reject(error);

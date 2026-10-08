@@ -8,7 +8,11 @@ import { createConversation, configureConversation, makeHint, addSegment } from 
 import { deleteConversation } from './infra';
 import { selectEvidence, classify } from './ai';
 import { SegmentSchema, PatchSchema } from '@sufler/shared';
-vi.mock('./ai', () => ({ selectEvidence: vi.fn(), classify: vi.fn() }));
+vi.mock('./ai', async (original) => ({
+  ...(await original<object>()),
+  selectEvidence: vi.fn(),
+  classify: vi.fn(),
+}));
 const original = {
   ragEnabled: config.ragEnabled,
   defaultAssistanceMode: config.defaultAssistanceMode,
@@ -162,4 +166,29 @@ describe('sales scripts without RAG', () => {
     expect(hint?.blocks).toEqual([]);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
+});
+
+it('keeps published script hints available when classification is forbidden', async () => {
+  const { conversation } = await setupScript();
+  vi.mocked(classify).mockRejectedValue(new Error('Forbidden'));
+  await addSegment(
+    user,
+    conversation.id,
+    SegmentSchema.parse({
+      id: randomUUID(),
+      role: 'customer',
+      text: 'Хочу новый телефон',
+      createdAt: new Date().toISOString(),
+    }),
+  );
+  await vi.waitFor(async () => {
+    const saved = await store.get<any>(user.orgId, 'conversation', conversation.id);
+    expect(saved.error).toContain('403');
+    expect(
+      saved.hints.some(
+        (hint: any) => hint.status === 'current' && hint.text.includes('Уточните потребность'),
+      ),
+    ).toBe(true);
+  });
+  expect(selectEvidence).not.toHaveBeenCalled();
 });

@@ -5,7 +5,12 @@ import { z } from 'zod';
 import { session, assertOrigin } from './auth';
 import { config } from './config';
 import { events, emit } from './events';
-import { addSegment, requireConversation, createConversation } from './conversations';
+import {
+  addSegment,
+  requireConversation,
+  createConversation,
+  assignSpeaker,
+} from './conversations';
 import { store } from './store';
 import { putFile, deleteFile } from './storage';
 import { decodeAudioFrame, type AppEvent, type Conversation } from '@sufler/shared';
@@ -52,6 +57,8 @@ export function setupLive(server: Server) {
           draining = false,
           sequence = 0,
           receivedSamples = 0;
+        let audioEpoch = 0;
+        const promptedSpeakers = new Set<string>();
         let writeChain = Promise.resolve();
         const send = (event: AppEvent) => {
           if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(event));
@@ -83,6 +90,7 @@ export function setupLive(server: Server) {
             .catch(() => send({ type: 'error', data: 'Не удалось сохранить часть аудиозаписи' }));
         };
         const stopAudio = (graceful = false) => {
+          audioEpoch++;
           if (graceful && speech?.readyState === WebSocket.OPEN && !enrolling) {
             if (!draining) {
               draining = true;
@@ -158,7 +166,7 @@ export function setupLive(server: Server) {
                 type: z.enum(['audio.start', 'audio.stop', 'audio.assign']),
                 mode: z.enum(['enroll', 'listen']).optional(),
                 speakerId: z.string().max(80).optional(),
-                role: z.enum(['customer', 'bystander']).optional(),
+                role: z.enum(['customer', 'consultant', 'bystander']).optional(),
               })
               .parse(JSON.parse(data.toString()));
             if (message.type === 'audio.stop') {
@@ -168,6 +176,8 @@ export function setupLive(server: Server) {
             }
             if (message.type === 'audio.assign') {
               if (!message.speakerId || !message.role) throw new Error('Выберите говорящего');
+              if (conversationId)
+                await assignSpeaker(user, conversationId, message.speakerId, message.role);
               speech?.send(
                 JSON.stringify({
                   type: 'assign',
@@ -188,9 +198,12 @@ export function setupLive(server: Server) {
               return;
             }
             if (!conversationId) throw new Error('Сначала начните диалог');
+            const requestEpoch = ++audioEpoch;
             const current = await requireConversation(user, conversationId, true);
+            if (requestEpoch !== audioEpoch || ws.readyState !== WebSocket.OPEN) return;
             if (current.status !== 'active') throw new Error('Диалог завершён');
             if (speech) throw new Error('Микрофон уже подключён');
+            promptedSpeakers.clear();
             enrolling = message.mode === 'enroll';
             draining = false;
             sequence = 0;
@@ -298,8 +311,10 @@ export function setupLive(server: Server) {
                       });
                       return;
                     }
-                    send({ type: 'session.boundary', conversationId, data: parsed });
-                    return;
+                    if (!promptedSpeakers.has(parsed.speakerId)) {
+                      promptedSpeakers.add(parsed.speakerId);
+                      send({ type: 'session.boundary', conversationId, data: parsed });
+                    }
                   }
                   await addSegment(user, targetId, {
                     ...parsed,

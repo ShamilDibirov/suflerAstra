@@ -8,6 +8,7 @@ import contextlib
 import hmac
 import os
 import time
+import uuid
 from contextlib import asynccontextmanager
 
 import numpy as np
@@ -86,18 +87,11 @@ async def embed(audio):
         return await asyncio.to_thread(vector, audio)
 
 
-async def transcribe(audio, ws, speaker):
-    pcm = (np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes()
-
-    async def chunks():
-        for index in range(0, len(pcm), 3200):
-            yield pcm[index:index + 3200]
-            await asyncio.sleep(0)
-
+async def transcribe(audio_stream, ws, speaker):
     text = ""
     async with Mistral(api_key=os.environ["MISTRAL_API_KEY"]) as client, asyncio.timeout(25):
         async for event in client.audio.realtime.transcribe_stream(
-            audio_stream=chunks(), model="voxtral-mini-transcribe-realtime-2602",
+            audio_stream=audio_stream, model="voxtral-mini-transcribe-realtime-2602",
             audio_format=AudioFormat(encoding="pcm_s16le", sample_rate=SR),
             target_streaming_delay_ms=500,
         ):
@@ -165,7 +159,8 @@ async def stream(ws: WebSocket):
             last_staff_end = -100
             last_speech_end = 0.0
             turn_speaker = None
-            turn_audio = []
+            speaker_namespace = uuid.uuid4().hex[:12]
+            active_turn = None
             turn_start = 0.0
             turn_end = 0.0
             turn_gap = 0.0
@@ -173,14 +168,32 @@ async def stream(ws: WebSocket):
             async def consume():
                 nonlocal customer, last_staff_end, last_speech_end
                 while True:
-                    speaker, samples, start, end, gap = await queue.get()
+                    item = await queue.get()
                     try:
+                        speaker = item["speaker"]
+                        async def chunks():
+                            while True:
+                                chunk = await item["chunks"].get()
+                                if chunk is None:
+                                    return
+                                yield chunk
+                        # Read the turn while Diart is still delivering its PCM,
+                        # rather than opening ASR after the whole turn is finished.
+                        if roles.get(speaker) == "bystander":
+                            async for _ in chunks():
+                                pass
+                            continue
+                        public_speaker = f"{speaker_namespace}:{speaker}"
+                        text = await transcribe(chunks(), ws, public_speaker)
+                        await ws.send_json({"type": "partial", "text": "", "speakerId": public_speaker})
+                        samples = np.concatenate(item["audio"])
+                        start, end, gap = item["start"], item["end"], item["gap"]
                         if len(samples) < SR * .65:
                             continue
                         identity = await embed(samples)
                         similarity = float(np.dot(staff, identity))
                         role = roles.get(speaker, "unknown")
-                        if similarity >= float(os.getenv("STAFF_SIMILARITY_THRESHOLD", "0.65")):
+                        if role == "consultant" or (role == "unknown" and similarity >= float(os.getenv("STAFF_SIMILARITY_THRESHOLD", "0.65"))):
                             role = "consultant"
                             roles[speaker] = role
                             last_staff_end = end
@@ -192,10 +205,9 @@ async def stream(ws: WebSocket):
                             roles[speaker] = role
                         if role == "bystander":
                             continue
-                        text = await transcribe(samples, ws, speaker)
                         if text:
                             await ws.send_json({"type": "segment", "text": text, "role": role,
-                                "speakerId": speaker, "startMs": round(start * 1000), "endMs": round(end * 1000),
+                                "speakerId": public_speaker, "startMs": round(start * 1000), "endMs": round(end * 1000),
                                 "confidence": .9 if role != "unknown" else .5,
                                 "newSpeaker": role == "unknown", "gapMs": round(gap * 1000)})
                     finally:
@@ -204,13 +216,14 @@ async def stream(ws: WebSocket):
             consumer = asyncio.create_task(consume())
 
             async def finish_turn():
-                nonlocal turn_audio, turn_speaker, last_speech_end
-                if turn_audio:
-                    if queue.full():
-                        raise ValueError("Распознавание отстаёт. Приостановите запись и проверьте соединение.")
-                    queue.put_nowait((turn_speaker, np.concatenate(turn_audio), turn_start, turn_end, turn_gap))
+                nonlocal turn_speaker, last_speech_end, active_turn
+                if active_turn is not None:
+                    if active_turn["chunks"].full():
+                        raise ValueError("Распознавание отстаёт. Приостановите запись.")
+                    active_turn["chunks"].put_nowait(None)
                     last_speech_end = turn_end
-                turn_audio, turn_speaker = [], None
+                active_turn = None
+                turn_speaker = None
 
             rolling = np.zeros(0, dtype=np.float32)
             total, since_step = 0, 0
@@ -218,7 +231,7 @@ async def stream(ws: WebSocket):
             rolling = np.zeros(5 * SR, dtype=np.float32)
 
             async def feed(values):
-                nonlocal rolling, total, since_step, turn_speaker, turn_start, turn_gap, turn_end
+                nonlocal rolling, total, since_step, turn_speaker, turn_start, turn_gap, turn_end, active_turn
                 rolling = np.concatenate((rolling, values))[-5 * SR:]
                 total += len(values)
                 since_step += len(values)
@@ -229,7 +242,7 @@ async def stream(ws: WebSocket):
                 async with inference_lock:
                     results = await asyncio.to_thread(pipeline, [window])
                 for annotation, stable in results:
-                    labels = annotation.labels()
+                    labels = annotation.crop(stable.extent, mode="intersection").labels()
                     start, end = stable.extent.start, stable.extent.end
                     if end <= 0:
                         continue
@@ -246,9 +259,20 @@ async def stream(ws: WebSocket):
                     if speaker != turn_speaker:
                         await finish_turn()
                         turn_speaker, turn_start, turn_gap = speaker, start, max(0, start - last_speech_end)
-                    turn_audio.append(samples)
+                    if active_turn is None:
+                        if queue.full():
+                            raise ValueError("Распознавание отстаёт. Приостановите запись.")
+                        active_turn = {"speaker": speaker, "start": turn_start, "end": end,
+                                       "gap": turn_gap, "audio": [], "chunks": asyncio.Queue(maxsize=32)}
+                        queue.put_nowait(active_turn)
+                    active_turn["audio"].append(samples)
+                    active_turn["end"] = end
+                    if active_turn["chunks"].full():
+                        raise ValueError("Распознавание отстаёт. Приостановите запись.")
+                    pcm = (np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes()
+                    active_turn["chunks"].put_nowait(pcm)
                     turn_end = end
-                    if end - turn_start >= 10:
+                    if end - turn_start >= 4:
                         await finish_turn()
 
             await ws.send_json({"type": "ready"})
@@ -271,10 +295,14 @@ async def stream(ws: WebSocket):
                         if consumer.done():
                             consumer.result()
                         break
-                    if msg.get("type") == "assign" and msg.get("role") in ("customer", "bystander"):
-                        roles[str(msg["speakerId"])] = msg["role"]
+                    if msg.get("type") == "assign" and msg.get("role") in ("customer", "consultant", "bystander"):
+                        assigned = str(msg["speakerId"])
+                        if not assigned.startswith(f"{speaker_namespace}:"):
+                            continue
+                        assigned = assigned.split(":", 1)[1]
+                        roles[assigned] = msg["role"]
                         if msg["role"] == "customer":
-                            customer = str(msg["speakerId"])
+                            customer = assigned
                     continue
                 binary = packet.get("bytes", b"")
                 if not binary or len(binary) > 6400 or len(binary) % 2:

@@ -22,7 +22,7 @@ import {
 } from '@sufler/shared/engine';
 import { store } from './store';
 import { emit } from './events';
-import { classify, selectEvidence } from './ai';
+import { classify, selectEvidence, providerError } from './ai';
 import { retrieve, scriptSources } from './knowledge';
 import { redis } from './infra';
 import { config } from './config';
@@ -136,6 +136,30 @@ export async function addSegment(user: SessionUser, id: string, segment: Transcr
   if (meaningful) void classifyLatest(user, c).catch((e) => recordError(user, id, e));
   return c;
 }
+export async function assignSpeaker(
+  user: SessionUser,
+  id: string,
+  speakerId: string,
+  role: 'customer' | 'consultant' | 'bystander',
+) {
+  await requireConversation(user, id, true);
+  cancel(id);
+  const c = await store.mutateConversation(user.orgId, id, (v) => {
+    if (v.status !== 'active') return null;
+    const next = invalidate(v);
+    next.segments = next.segments.map((segment) =>
+      segment.speakerId === speakerId && segment.role === 'unknown'
+        ? { ...segment, role, excluded: role === 'bystander', confidence: 1 }
+        : segment,
+    );
+    return next;
+  });
+  if (c) {
+    update(c);
+    if (role !== 'bystander') void classifyLatest(user, c).catch((e) => recordError(user, id, e));
+  }
+  return c;
+}
 export async function editSegment(
   user: SessionUser,
   id: string,
@@ -171,15 +195,22 @@ async function recordError(user: SessionUser, id: string, error: unknown) {
   if (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError'))
     return;
   const c = await store.mutateConversation(user.orgId, id, (v) =>
-    v.status === 'active'
-      ? { ...v, error: error instanceof Error ? error.message : 'Не удалось обработать запрос' }
-      : null,
+    v.status === 'active' ? { ...v, error: providerError(error) } : null,
   );
   if (c) update(c);
 }
 async function classifyLatest(user: SessionUser, snapshot: Conversation) {
   const controller = new AbortController();
   classifiers.set(snapshot.id, controller);
+  const status = (message: string) => {
+    if (!controller.signal.aborted)
+      emit(user.orgId, user.id, {
+        type: 'context.status',
+        conversationId: snapshot.id,
+        data: { message },
+      });
+  };
+  status('KEV · анализируем подтверждённую реплику…');
   try {
     const docs = (await store.list<KnowledgeDocument>(user.orgId, 'document')).filter(
       (d) =>
@@ -187,7 +218,27 @@ async function classifyLatest(user: SessionUser, snapshot: Conversation) {
         ((snapshot.assistanceMode || config.defaultAssistanceMode) !== 'scripts' ||
           (d.direction === 'sales' && d.intent !== 'sales_best_practices')),
     );
-    const result = await classify(snapshot, docs, controller.signal);
+    let result;
+    try {
+      result = await classify(snapshot, docs, controller.signal, 'pipeline', (reason) =>
+        status(`KEV не подтвердил контекст: ${reason}. Проверяем резервный Qwen…`),
+      );
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      status(`Контекст не обновлён: ${providerError(error)}`);
+      // Published, explicitly selected scripts do not depend on classifier availability.
+      if (
+        snapshot.autoHints &&
+        snapshot.salesScriptId &&
+        (snapshot.assistanceMode || config.defaultAssistanceMode) === 'scripts' &&
+        !controller.signal.aborted
+      ) {
+        const latest = await requireConversation(user, snapshot.id, true);
+        if (latest.generationEpoch === snapshot.generationEpoch)
+          await makeHint(user, snapshot.id, '', false).catch(() => null);
+      }
+      throw error;
+    }
     if (controller.signal.aborted) return;
     const c = await store.mutateConversation(user.orgId, snapshot.id, (v) => {
       if (
@@ -213,6 +264,9 @@ async function classifyLatest(user: SessionUser, snapshot: Conversation) {
       return { ...next, error: null };
     });
     if (!c) return;
+    status(
+      `Контекст обновлён · ${result.source === 'kev' ? 'KEV 4B' : result.source === 'qwen' ? 'резервный Qwen' : 'демо'}`,
+    );
     update(c);
     await store.put(user.orgId, 'usage', randomUUID(), {
       conversationId: c.id,

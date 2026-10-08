@@ -11,6 +11,7 @@ import {
   configureConversation,
   addSegment,
   editSegment,
+  assignSpeaker,
   makeHint,
   requireConversation,
   finish,
@@ -18,7 +19,11 @@ import {
 import { publishDocument, saveDocument } from '../apps/api/src/knowledge';
 import { deleteConversation, retention } from '../apps/api/src/infra';
 import { classify, selectEvidence } from '../apps/api/src/ai';
-vi.mock('../apps/api/src/ai', () => ({ classify: vi.fn(), selectEvidence: vi.fn() }));
+vi.mock('../apps/api/src/ai', async (original) => ({
+  ...(await original<object>()),
+  classify: vi.fn(),
+  selectEvidence: vi.fn(),
+}));
 let user: SessionUser, docs: KnowledgeDocument[];
 const classification = {
   patch: PatchSchema.parse({
@@ -261,5 +266,38 @@ describe('server authorization and asynchronous state', () => {
     expect(saved.version).toBe(2);
     expect(saved.blocks.map((b) => b.id)).not.toContain(old.blocks[0].id);
     expect(saved.blocks[2].requiredFacts).toEqual([saved.blocks[1].id]);
+  });
+});
+
+describe('speaker assignment', () => {
+  it('recovers recorded unknown speech without admitting other session voices', async () => {
+    const c = await createConversation(user);
+    const first = {
+      ...segment(),
+      role: 'unknown' as const,
+      speakerId: 'session-a:speaker0',
+      excluded: true,
+    };
+    const other = {
+      ...segment('Other voice'),
+      role: 'unknown' as const,
+      speakerId: 'session-b:speaker0',
+      excluded: true,
+    };
+    await addSegment(user, c.id, first);
+    await addSegment(user, c.id, other);
+    expect(classify).not.toHaveBeenCalled();
+    await assignSpeaker(user, c.id, first.speakerId, 'customer');
+    await waitForClassification(c.id);
+    const saved = await requireConversation(user, c.id);
+    expect(saved.segments.find((s) => s.id === first.id)).toMatchObject({
+      role: 'customer',
+      excluded: false,
+    });
+    expect(saved.segments.find((s) => s.id === other.id)).toMatchObject({
+      role: 'unknown',
+      excluded: true,
+    });
+    expect(saved.segments).toHaveLength(2);
   });
 });
