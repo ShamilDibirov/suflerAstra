@@ -34,6 +34,7 @@ import { useSession } from '@/hooks/use-session';
 import { Shell, LoadingScreen } from './shell';
 import { Button } from './ui/button';
 import { Dialog } from './ui/dialog';
+import { PromptEditor } from './prompt-editor';
 type Overview = {
   documents: number;
   published: number;
@@ -58,6 +59,7 @@ const headings: Record<string, [string, string]> = {
   knowledge: ['База знаний', 'Проверенные знания — основа точных подсказок.'],
   processes: ['Сервисные процессы', 'Понятные шаги для каждой ситуации клиента.'],
   catalog: ['Каталог предложений', 'Тарифы, устройства, услуги и аксессуары.'],
+  prompts: ['Промпты продаж', 'Настройте стиль подсказок и работу с возражениями без базы знаний.'],
   models: ['AI-модели', 'Выбирайте баланс скорости, качества и стоимости.'],
   users: ['Ваша команда', 'Личные учётные записи и доступ к организации.'],
   history: ['История диалогов', 'Посмотрите, как Суфлёр помогает вашей команде.'],
@@ -294,6 +296,7 @@ export function Admin({ section }: { section: string }) {
           </button>
         </div>
       )}
+      {section === 'prompts' && <PromptEditor key={user.orgId} />}
       {(section === 'overview' || section === 'metrics') && (
         <>
           <div className="stat-grid">

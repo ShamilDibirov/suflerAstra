@@ -283,7 +283,7 @@ export function Workspace() {
         conversation?.error ||
         ((conversation?.assistanceMode || runtime.defaultAssistanceMode) === 'scripts' &&
         !conversation?.salesScriptId
-          ? 'Выберите опубликованный скрипт продаж выше. Следующий шаг появится без обращения к LLM.'
+          ? 'База знаний не нужна: начните разговор или нажмите «Подскажи». Модель предложит следующий вопрос по промпту продаж.'
           : undefined)
       }
       busy={busy}
@@ -315,7 +315,7 @@ export function Workspace() {
               disabled={busy}
               onChange={(e) => void change({ assistanceMode: e.target.value })}
             >
-              <option value="scripts">Продажи по скрипту</option>
+              <option value="scripts">Продажи · промпт или скрипт</option>
               {runtime.ragEnabled && <option value="rag">По базе знаний</option>}
             </select>
           </div>
@@ -346,14 +346,14 @@ export function Workspace() {
       {(conversation?.assistanceMode || runtime.defaultAssistanceMode) === 'scripts' && (
         <div className="info-banner" style={{ marginBottom: 16 }}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-            Скрипт продажи
+            Режим продаж
             <select
               aria-label="Скрипт продажи"
               value={conversation?.salesScriptId || ''}
               disabled={busy}
               onChange={(e) => void change({ salesScriptId: e.target.value || null })}
             >
-              <option value="">По намерению клиента</option>
+              <option value="">По промпту · без базы знаний</option>
               {docs
                 .filter((d) => d.type === 'process' && d.direction === 'sales')
                 .map((d) => (
@@ -364,7 +364,8 @@ export function Workspace() {
             </select>
           </label>
           <p style={{ marginTop: 8 }}>
-            Подтверждайте выполненные шаги. В чате доступны опубликованные практики консультации.
+            Без выбранного скрипта работают промпты продаж и чата. При выборе скрипта подтверждайте
+            выполненные шаги.
           </p>
         </div>
       )}

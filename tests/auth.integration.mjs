@@ -142,6 +142,7 @@ try {
     '/api/admin/documents',
     '/api/admin/history',
     '/api/admin/models',
+    '/api/admin/prompts',
     '/api/admin/overview',
   ])
     assert.equal((await call(path, { cookie: staff })).status, 403, path);
@@ -195,8 +196,31 @@ try {
     method: 'POST',
     body: {},
   });
-  assert.equal(hint.status, 201);
-  assert.equal(hint.body.kind, 'no_evidence');
+  assert.equal(hint.status, 400);
+  assert.match(hint.body.message, /OPENROUTER_API_KEY/);
+  const promptValues = {
+    hintPrompt: 'Уточняй потребность и бюджет без давления.',
+    chatPrompt: 'Помогай отвечать на возражения и уважай отказ.',
+  };
+  assert.equal(
+    (await call('/api/admin/prompts', { cookie: staff, method: 'POST', body: promptValues }))
+      .status,
+    403,
+  );
+  const savedPrompts = await call('/api/admin/prompts', {
+    cookie: owner,
+    method: 'POST',
+    body: promptValues,
+  });
+  assert.equal(savedPrompts.status, 201);
+  assert.equal(
+    (await call('/api/admin/prompts', { cookie: owner })).body.settings.hintPrompt,
+    promptValues.hintPrompt,
+  );
+  assert.notEqual(
+    (await call('/api/admin/prompts', { cookie: other })).body.settings.hintPrompt,
+    promptValues.hintPrompt,
+  );
   assert.equal(
     (await call('/api/admin/sales-templates', { cookie: staff, method: 'POST', body: {} })).status,
     403,
@@ -311,7 +335,7 @@ try {
     });
   });
   console.log(
-    'PASS: PostgreSQL migration/bootstrap; password sign-in; no public sign-up; organization and role isolation; Origin checks; authorized/unauthorized WebSocket; grounded empty-base refusal; real-mode script publication without knowledge service; zero-token steps; role/tenant isolation for scripts.',
+    'PASS: PostgreSQL migration/bootstrap; password sign-in; no public sign-up; organization and role isolation; Origin checks; authorized/unauthorized WebSocket; prompt sales requires provider key, not knowledge; protected organization prompts; real-mode script publication without knowledge service; zero-token steps; role/tenant isolation for scripts.',
   );
 } catch (e) {
   console.error(e);

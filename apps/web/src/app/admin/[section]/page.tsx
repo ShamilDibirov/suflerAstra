@@ -5,9 +5,16 @@ export default async function Page({ params }: { params: Promise<{ section: stri
   await requirePageSession(true);
   const { section } = await params;
   if (
-    !['knowledge', 'processes', 'catalog', 'models', 'users', 'history', 'metrics'].includes(
-      section,
-    )
+    ![
+      'knowledge',
+      'processes',
+      'catalog',
+      'prompts',
+      'models',
+      'users',
+      'history',
+      'metrics',
+    ].includes(section)
   )
     notFound();
   return <Admin section={section} />;

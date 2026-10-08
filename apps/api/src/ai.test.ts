@@ -1,6 +1,6 @@
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { generateText } from 'ai';
-import { classify, selectEvidence } from './ai';
+import { classify, selectEvidence, salesAdvice, validateCoaching } from './ai';
 import { newConversation } from '@sufler/shared/engine';
 import { demoDocuments } from '@sufler/shared/demo';
 import { MODEL_DEFAULTS, PatchSchema, SegmentSchema } from '@sufler/shared';
@@ -132,4 +132,39 @@ describe('provider contracts with mocked responses (not model quality)', () => {
       );
     },
   );
+});
+
+it('generates prompt sales advice without retrieval, using selected model and masked speech', async () => {
+  vi.mocked(generateText).mockResolvedValue({
+    output: { text: 'Уточните, какие задачи важнее для клиента.' },
+    usage: { inputTokens: 50, outputTokens: 12 },
+  } as never);
+  const result = await salesAdvice(
+    card(),
+    'Что спросить?',
+    'Задавай один открытый вопрос.',
+    new AbortController().signal,
+  );
+  expect(result.text).toContain('Уточните');
+  const request = vi.mocked(generateText).mock.calls[0][0];
+  expect(request.system).toContain('Задавай один открытый вопрос.');
+  expect(request.system).toContain('Не утверждай цены');
+  expect(request.prompt).not.toContain('999');
+  expect(fetchMock).not.toHaveBeenCalled();
+  expect(validateCoaching('Тариф стоит 500 рублей.')).not.toContain('500');
+});
+
+it('offers general sales intents to KEV without knowledge documents', async () => {
+  const c = card();
+  c.assistanceMode = 'scripts';
+  const data = response();
+  data.answers.direction.choice = 'sales';
+  data.answers.intent.choice = 'sales_discovery';
+  fetchMock.mockResolvedValue(
+    new Response(JSON.stringify(data), { headers: { 'Content-Type': 'application/json' } }),
+  );
+  const result = await classify(c, [], new AbortController().signal);
+  expect(result.patch.intent).toBe('sales_discovery');
+  const payload = JSON.parse(fetchMock.mock.calls[0][1].body);
+  expect(payload.questions.intent.criteria).toHaveProperty('device_selection');
 });

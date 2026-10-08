@@ -35,17 +35,23 @@ export function HintCard({
         </span>
         <span className="hint-auto">
           <span className="green-dot" />
-          {busy ? 'Обновляем…' : 'На основе вашей базы'}
+          {busy
+            ? 'Обновляем…'
+            : hint?.kind === 'coaching'
+              ? 'По промпту продаж'
+              : 'На основе вашей базы'}
         </span>
       </div>
       {hint ? (
         <>
           <h2 className="hint-title">
-            {hint.kind === 'service'
-              ? 'Помогите клиенту сделать следующий шаг'
-              : hint.kind === 'sales'
-                ? 'Есть подходящее предложение'
-                : 'Уточним, прежде чем советовать'}
+            {hint.kind === 'coaching'
+              ? 'Следующий шаг в разговоре'
+              : hint.kind === 'service'
+                ? 'Помогите клиенту сделать следующий шаг'
+                : hint.kind === 'sales'
+                  ? 'Есть подходящее предложение'
+                  : 'Уточним, прежде чем советовать'}
           </h2>
           <p className="hint-body">{hint.text}</p>
           {hint.blocks.length > 0 && (
@@ -78,7 +84,9 @@ export function HintCard({
         </div>
         <span className="hint-footer-meta">
           <ShieldCheck size={12} />
-          Только подтверждённые знания
+          {hint?.kind === 'coaching'
+            ? 'Рекомендация по общению · без базы'
+            : 'Только подтверждённые знания'}
         </span>
       </div>
     </section>

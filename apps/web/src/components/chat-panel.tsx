@@ -64,7 +64,9 @@ export function ChatPanel({
   return (
     <div className="chat-layout">
       <div className="info-banner" style={{ fontSize: 12, marginBottom: 10 }}>
-        Карточка клиента и подтверждённые источники уже в контексте.
+        {conversation.assistanceMode === 'scripts' && !conversation.salesScriptId
+          ? 'Продажи по промпту: карточка и разговор в контексте. База знаний не используется.'
+          : 'Карточка клиента и подтверждённые источники уже в контексте.'}
       </div>
       <Conversation>
         <ConversationContent>
@@ -109,7 +111,7 @@ export function ChatPanel({
               </Message>
             );
           })}
-          {busy && <small>Проверяем источники…</small>}
+          {busy && <small>Готовим ответ…</small>}
         </ConversationContent>
         <ConversationScrollButton />
       </Conversation>
@@ -132,7 +134,12 @@ export function ChatPanel({
           <ArrowUp size={18} />
         </Button>
       </form>
-      <div className="chat-meta">{conversation.modelId} · Ответ проверяется до отображения</div>
+      <div className="chat-meta">
+        {conversation.modelId} ·{' '}
+        {conversation.assistanceMode === 'scripts' && !conversation.salesScriptId
+          ? 'Рекомендации по общению'
+          : 'Ответ проверяется до отображения'}
+      </div>
     </div>
   );
 }

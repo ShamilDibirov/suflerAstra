@@ -22,10 +22,11 @@ import {
 } from '@sufler/shared/engine';
 import { store } from './store';
 import { emit } from './events';
-import { classify, selectEvidence, providerError } from './ai';
+import { classify, selectEvidence, providerError, salesAdvice } from './ai';
 import { retrieve, scriptSources } from './knowledge';
 import { redis } from './infra';
 import { config } from './config';
+import { getPrompts } from './prompts';
 
 const classifiers = new Map<string, AbortController>(),
   generators = new Map<string, AbortController>();
@@ -226,10 +227,9 @@ async function classifyLatest(user: SessionUser, snapshot: Conversation) {
     } catch (error) {
       if (controller.signal.aborted) return;
       status(`Контекст не обновлён: ${providerError(error)}`);
-      // Published, explicitly selected scripts do not depend on classifier availability.
+      // Sales advice can use confirmed speech even if classification fails.
       if (
         snapshot.autoHints &&
-        snapshot.salesScriptId &&
         (snapshot.assistanceMode || config.defaultAssistanceMode) === 'scripts' &&
         !controller.signal.aborted
       ) {
@@ -275,7 +275,12 @@ async function classifyLatest(user: SessionUser, snapshot: Conversation) {
       ...result.usage,
       at: new Date().toISOString(),
     });
-    if (c.autoHints && (result.patch.shouldHint || findUrgent(c, docs)))
+    if (
+      c.autoHints &&
+      (result.patch.shouldHint ||
+        findUrgent(c, docs) ||
+        ((c.assistanceMode || config.defaultAssistanceMode) === 'scripts' && !c.salesScriptId))
+    )
       await makeHint(user, c.id, '', false);
   } finally {
     if (classifiers.get(snapshot.id) === controller) classifiers.delete(snapshot.id);
@@ -371,7 +376,7 @@ export async function configureConversation(
     return n;
   });
   if (c) update(c);
-  if (c && (patch.completedStep || patch.salesScriptId)) {
+  if (c && (patch.completedStep || patch.salesScriptId !== undefined)) {
     await makeHint(user, id, '', true);
     return requireConversation(user, id, true);
   }
@@ -402,6 +407,8 @@ export async function makeHint(
   generators.set(id, controller);
   const start = Date.now();
   try {
+    if (mode === 'scripts' && !c.salesScriptId)
+      return await makeCoachingHint(user, c, question, manual, controller, start);
     const query = [
       c.card.intent,
       ...c.card.secondaryIntents,
@@ -534,7 +541,8 @@ export async function makeHint(
   } catch (e) {
     if (controller.signal.aborted) return null;
     await recordError(user, id, e);
-    throw e;
+    if (e instanceof BadRequestException) throw e;
+    throw new BadRequestException(providerError(e));
   } finally {
     if (generators.get(id) === controller) generators.delete(id);
   }
@@ -561,4 +569,96 @@ function findUrgent(c: Conversation, docs: KnowledgeDocument[]) {
     );
     if (b) return { document: d, blockId: b.id };
   }
+}
+
+async function makeCoachingHint(
+  user: SessionUser,
+  c: Conversation,
+  question: string,
+  manual: boolean,
+  controller: AbortController,
+  start: number,
+) {
+  const prompts = await getPrompts(user.orgId);
+  const hash = createHash('sha256')
+    .update(
+      JSON.stringify({
+        context: compactContext(c.card, c.segments),
+        messages: question ? c.messages.slice(-6) : [],
+        model: c.modelId,
+        promptRevision: prompts.revision,
+        question,
+        recentHints: c.hints.slice(-3).map((h) => h.text),
+      }),
+    )
+    .digest('hex');
+  const key = `coaching:${user.orgId}:${c.id}:${hash}`;
+  const cached = redis ? await redis.get(key) : null;
+  const advice = cached
+    ? (JSON.parse(cached) as Awaited<ReturnType<typeof salesAdvice>>)
+    : await salesAdvice(
+        c,
+        question,
+        question ? prompts.chatPrompt : prompts.hintPrompt,
+        controller.signal,
+      );
+  if (controller.signal.aborted) return null;
+  if (!cached && redis) await redis.set(key, JSON.stringify(advice), 'EX', 60);
+  return store.withLock(`${user.orgId}:prompts`, async () => {
+    if (controller.signal.aborted || (await getPrompts(user.orgId)).revision !== prompts.revision)
+      return null;
+    if (!(await models(user.orgId)).some((m) => m.id === c.modelId && m.enabled)) return null;
+    const hint: Hint = {
+      id: randomUUID(),
+      revision: c.card.revision,
+      kind: 'coaching',
+      title: 'Продажи по промпту',
+      text: advice.text,
+      blocks: [],
+      modelId: c.modelId,
+      createdAt: new Date().toISOString(),
+      latencyMs: Date.now() - start,
+      inputTokens: cached ? 0 : advice.inputTokens,
+      outputTokens: cached ? 0 : advice.outputTokens,
+      cost: null,
+      status: 'current',
+    };
+    const updated = await store.mutateConversation(user.orgId, c.id, (v) => {
+      if (
+        v.status !== 'active' ||
+        v.card.revision !== c.card.revision ||
+        v.generationEpoch !== c.generationEpoch
+      )
+        return null;
+      if (!manual && v.hints.some((h) => h.status === 'current' && h.text === hint.text))
+        return null;
+      return {
+        ...v,
+        hints: [...v.hints.map((h) => ({ ...h, status: 'stale' as const })), hint].slice(-100),
+        messages: question
+          ? [
+              ...v.messages,
+              {
+                id: randomUUID(),
+                role: 'user' as const,
+                text: maskPII(question),
+                createdAt: hint.createdAt,
+              },
+              {
+                id: hint.id,
+                role: 'assistant' as const,
+                text: hint.text,
+                hint,
+                createdAt: hint.createdAt,
+              },
+            ].slice(-100)
+          : v.messages,
+        lastAutoHintAt: manual ? v.lastAutoHintAt : Date.now(),
+        error: null,
+      };
+    });
+    if (!updated) return null;
+    update(updated);
+    return hint;
+  });
 }

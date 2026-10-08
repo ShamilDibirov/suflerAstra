@@ -29,6 +29,8 @@ import {
   type ModelConfig,
 } from '@sufler/shared';
 import { config } from './config';
+import { getPrompts, savePrompts } from './prompts';
+import { DEFAULT_PROMPTS } from '@sufler/shared';
 import { session, assertAdmin, auth } from './auth';
 import { store, pool } from './store';
 import {
@@ -50,6 +52,14 @@ import { fromNodeHeaders } from 'better-auth/node';
 
 @Controller('api')
 export class ApiController {
+  @Get('admin/prompts') async prompts(@Req() req: Request) {
+    const user = await session(req);
+    assertAdmin(user);
+    return { settings: await getPrompts(user.orgId), defaults: DEFAULT_PROMPTS };
+  }
+  @Post('admin/prompts') async updatePrompts(@Req() req: Request, @Body() body: unknown) {
+    return savePrompts(await session(req), body);
+  }
   @Get('health') health() {
     return { ok: true, service: 'sufler-api' };
   }

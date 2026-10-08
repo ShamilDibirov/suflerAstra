@@ -122,7 +122,7 @@ export interface EvidenceRef {
 export interface Hint {
   id: string;
   revision: number;
-  kind: 'service' | 'sales' | 'clarify' | 'no_evidence';
+  kind: 'service' | 'sales' | 'clarify' | 'no_evidence' | 'coaching';
   title: string;
   text: string;
   blocks: EvidenceRef[];
@@ -272,3 +272,18 @@ export function decodeAudioFrame(
     throw new Error('Нарушена последовательность аудио. Запустите микрофон снова.');
   return frame.subarray(12);
 }
+
+export const DEFAULT_PROMPTS = {
+  hintPrompt:
+    'Ты суфлёр консультанта телеком-розницы. Помоги вести продажу: выяснить потребность, бюджет и привычки использования, сопоставить варианты, мягко обработать возражение и договориться о следующем шаге. Дай одну короткую конкретную подсказку и пример фразы сотрудника. Опирайся на текущий разговор, не повторяй уже заданные вопросы. Если информации мало, предложи один вопрос для уточнения. Пиши по-русски, спокойно, без давления на клиента.',
+  chatPrompt:
+    'Ты помощник консультанта телеком-розницы по продажам и общению с клиентом. Ответь на вопрос сотрудника с учётом карточки клиента, последних реплик и переписки. Предлагай конкретные вопросы и фразы, объясняй как выявить потребность и обработать возражение. Не дави на клиента и уважай отказ. Пиши по-русски кратко и по делу.',
+};
+export const PromptInput = z.object({
+  hintPrompt: z.string().trim().min(10).max(6000),
+  chatPrompt: z.string().trim().min(10).max(6000),
+});
+export type PromptSettings = z.infer<typeof PromptInput> & {
+  revision: number;
+  updatedAt: string | null;
+};
