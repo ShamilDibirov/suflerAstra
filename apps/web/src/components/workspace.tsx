@@ -60,6 +60,7 @@ export function Workspace() {
   const [conversation, setConversation] = useState<Conversation | null>(null),
     [models, setModels] = useState<ModelConfig[]>([]),
     [docs, setDocs] = useState<KnowledgeDocument[]>([]),
+    [runtime, setRuntime] = useState({ ragEnabled: true, defaultAssistanceMode: 'rag' }),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(''),
     [toast, setToast] = useState('');
@@ -121,8 +122,10 @@ export function Workspace() {
       api<Conversation[]>('/conversations'),
       api<ModelConfig[]>('/models'),
       api<KnowledgeDocument[]>('/knowledge'),
+      api<{ ragEnabled: boolean; defaultAssistanceMode: string }>('/config'),
     ])
-      .then(async ([history, list, knowledge]) => {
+      .then(async ([history, list, knowledge, settings]) => {
+        setRuntime(settings);
         setModels(list);
         setDocs(knowledge);
         const active = history.find((c) => c.status === 'active');
@@ -165,7 +168,13 @@ export function Workspace() {
   async function newClient() {
     audio.stop();
     setPartial('');
-    setConversation(await post<Conversation>('/conversations', { modelId: conversation?.modelId }));
+    const created = await post<Conversation>('/conversations', { modelId: conversation?.modelId });
+    const mode = conversation?.assistanceMode;
+    setConversation(
+      mode && (mode === 'scripts' || runtime.ragEnabled)
+        ? await patch<Conversation>(`/conversations/${created.id}`, { assistanceMode: mode })
+        : created,
+    );
   }
   async function hint() {
     if (conversation)
@@ -284,6 +293,17 @@ export function Workspace() {
         </div>
         <div className="heading-actions">
           <div className="model-select">
+            <select
+              aria-label="Режим подсказок"
+              value={conversation?.assistanceMode || runtime.defaultAssistanceMode}
+              disabled={busy}
+              onChange={(e) => void change({ assistanceMode: e.target.value })}
+            >
+              <option value="scripts">Продажи по скрипту</option>
+              {runtime.ragEnabled && <option value="rag">По базе знаний</option>}
+            </select>
+          </div>
+          <div className="model-select">
             <Sparkles size={14} />
             <select
               aria-label="Модель подсказок"
@@ -307,6 +327,31 @@ export function Workspace() {
           </Button>
         </div>
       </div>
+      {(conversation?.assistanceMode || runtime.defaultAssistanceMode) === 'scripts' && (
+        <div className="info-banner" style={{ marginBottom: 16 }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            Скрипт продажи
+            <select
+              aria-label="Скрипт продажи"
+              value={conversation?.salesScriptId || ''}
+              disabled={busy}
+              onChange={(e) => void change({ salesScriptId: e.target.value || null })}
+            >
+              <option value="">По намерению клиента</option>
+              {docs
+                .filter((d) => d.type === 'process' && d.direction === 'sales')
+                .map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.title}
+                  </option>
+                ))}
+            </select>
+          </label>
+          <p style={{ marginTop: 8 }}>
+            Подтверждайте выполненные шаги. В чате доступны опубликованные практики консультации.
+          </p>
+        </div>
+      )}
       {error && (
         <div
           role="alert"

@@ -106,6 +106,8 @@ pnpm test:rag:integration
 | `tests` | Доменные, асинхронные и интеграционные проверки |
 | `deploy/fly` | Конфигурации пяти приложений Fly.io |
 
+Для **продаж без векторного RAG** используйте `compose.coolify.sales.yml`: выбор скрипта, пошаговое подтверждение, опубликованные практики в чате. Weaviate и knowledge-worker не запускаются, сумма runtime memory limits около 2,6 GiB. В `/admin/processes` кнопка «Примеры продаж» создаёт редактируемые черновики, которые администратор проверяет и публикует.
+
 Для небольшого VPS **4 CPU / 8 ГБ RAM** предусмотрен `compose.coolify.small.yml`: одна аудиосессия, multilingual E5-small, гибридный поиск без тяжёлого reranker, PDF/DOCX без OCR. Аудиозапись выключена, история хранится 7 дней; параметры можно изменить через env. Для Coolify укажите `/compose.coolify.small.yml`. Полный профиль `compose.coolify.yml` сохраняет BGE-M3/reranker/Docling и требует больше ресурсов.
 
 Подробности: [архитектура и границы пилота](docs/architecture.md), [развёртывание в Coolify и на Fly.io](docs/deployment.md).

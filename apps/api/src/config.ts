@@ -1,4 +1,7 @@
 export const config = {
+  ragEnabled: process.env.RAG_ENABLED !== 'false',
+  defaultAssistanceMode: (process.env.ASSISTANCE_MODE ||
+    (process.env.RAG_ENABLED === 'false' ? 'scripts' : 'rag')) as 'rag' | 'scripts',
   port: Number(process.env.PORT || 4000),
   host: process.env.HOST || '127.0.0.1',
   demo: process.env.DEMO_MODE === 'true',
@@ -19,6 +22,11 @@ export const config = {
   recordAudio: process.env.AUDIO_RECORDING_ENABLED !== 'false',
 };
 export function validateConfig() {
+  if (
+    !['rag', 'scripts'].includes(config.defaultAssistanceMode) ||
+    (!config.ragEnabled && config.defaultAssistanceMode === 'rag')
+  )
+    throw new Error('ASSISTANCE_MODE must be scripts when RAG_ENABLED=false');
   if (
     !Number.isInteger(config.retentionDays) ||
     config.retentionDays < 1 ||

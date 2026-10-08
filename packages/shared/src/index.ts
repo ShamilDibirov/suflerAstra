@@ -153,6 +153,8 @@ export interface Conversation {
   hints: Hint[];
   messages: ChatMessage[];
   modelId: string;
+  assistanceMode?: 'rag' | 'scripts';
+  salesScriptId?: string | null;
   region?: string;
   autoHints: boolean;
   lastAutoHintAt: number;

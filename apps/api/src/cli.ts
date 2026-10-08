@@ -158,7 +158,7 @@ async function check() {
   }
   for (const [name, url] of [
     ['speech', config.speech],
-    ['knowledge', config.knowledge],
+    ...(config.ragEnabled ? [['knowledge', config.knowledge]] : []),
   ]) {
     try {
       const r = await fetch(`${url}/health`, {

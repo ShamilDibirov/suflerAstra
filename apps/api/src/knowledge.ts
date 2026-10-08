@@ -78,9 +78,9 @@ export async function publishDocument(
       throw new BadRequestException('Зависимость шага не найдена');
     if (doc.validUntil && doc.validUntil < new Date().toISOString().slice(0, 10))
       throw new BadRequestException('Срок действия истёк');
-    if (!config.demo) await knowledgeCall('/index', { document: doc });
+    if (!config.demo && config.ragEnabled) await knowledgeCall('/index', { document: doc });
     doc.publishedAt = new Date().toISOString();
-    doc.indexedVersion = doc.version;
+    doc.indexedVersion = config.ragEnabled ? doc.version : null;
   }
   return store.withLock(`${user.orgId}:knowledge`, async () => {
     const latest = await store.get<KnowledgeDocument>(user.orgId, 'document', id);
@@ -141,12 +141,16 @@ export async function retrieve(
       .slice(0, 5)
       .map((v) => v.doc);
   }
+  if (!config.ragEnabled)
+    throw new BadRequestException('RAG отключён. Выберите продажи по скрипту.');
   if (!docs.length) return [];
+  const indexed = docs.filter((d) => d.indexedVersion === d.version);
+  if (!indexed.length) return [];
   const result = (await knowledgeCall('/search', {
     orgId: org,
     query: maskPII(query).slice(0, 1000),
     region,
-    versions: docs.map((d) => ({ id: d.id, version: d.version })),
+    versions: indexed.map((d) => ({ id: d.id, version: d.version })),
   })) as { results: { documentId: string; blockId: string; version: number }[] };
   return docs
     .map((d) => ({
@@ -183,4 +187,78 @@ export async function ingestDocument(org: string, id: string) {
   }
   doc.updatedAt = new Date().toISOString();
   await store.put(org, 'document', id, doc);
+}
+
+/** Direct, bounded script selection. Never calls embeddings, search or file parsing. */
+export async function scriptSources(c: Conversation): Promise<KnowledgeDocument[]> {
+  const docs = (await store.list<KnowledgeDocument>(c.orgId, 'document')).filter(
+    (d) =>
+      isPublished(d, c.orgId) &&
+      d.direction === 'sales' &&
+      (d.region === 'Все регионы' || d.region === (c.region || 'Все регионы')),
+  );
+  const script = c.salesScriptId
+    ? docs.find((d) => d.id === c.salesScriptId && d.type === 'process')
+    : docs.find((d) => d.type === 'process' && d.intent === c.card.intent);
+  const practices = docs
+    .filter(
+      (d) =>
+        d.type === 'article' && (d.intent === 'sales_best_practices' || d.intent === c.card.intent),
+    )
+    .slice(0, 3);
+  if (!script) return practices;
+  const next = script.blocks.find(
+    (b) => b.kind === 'step' && !c.card.completedSteps.includes(b.id),
+  );
+  return [
+    { ...script, blocks: script.blocks.filter((b) => b.kind !== 'step' || b.id === next?.id) },
+    ...practices,
+  ];
+}
+
+export async function addSalesTemplates(user: SessionUser) {
+  const existing = await store.list<KnowledgeDocument>(user.orgId, 'document');
+  const templates = [
+    {
+      title: 'Базовый скрипт продажи',
+      type: 'process' as const,
+      intent: 'sales_discovery',
+      paragraphs: [
+        'Уточните, что клиент хочет решить: связь, интернет, устройство или аксессуар.',
+        'Спросите, как клиент сейчас пользуется продуктом и что его не устраивает.',
+        'Уточните бюджет и приоритет: цена, удобство или конкретная возможность.',
+        'Предложите сравнить подходящие варианты по подтверждённым условиям. Не обещайте неизвестные цены и наличие.',
+        'Уточните сомнения клиента и предложите следующий шаг без давления.',
+      ],
+    },
+    {
+      title: 'Практики консультации и работа с возражениями',
+      type: 'article' as const,
+      intent: 'sales_best_practices',
+      paragraphs: [
+        'Задавайте один открытый вопрос за раз и кратко проверяйте, правильно ли поняли потребность.',
+        'При возражении о цене уточните, с чем клиент сравнивает предложение и что для него важнее.',
+        'Привязывайте предложение к озвученной потребности. Не добавляйте ненужные услуги и не скрывайте ограничения.',
+        'Если цена, срок действия, условия или наличие не подтверждены, предложите проверить их в системе оператора.',
+      ],
+    },
+  ];
+  const created = [];
+  for (const template of templates) {
+    if (existing.some((d) => d.intent === template.intent)) continue;
+    created.push(
+      await saveDocument(user, {
+        ...template,
+        direction: 'sales',
+        description: 'Учебная заготовка. Проверьте и адаптируйте перед публикацией.',
+        content: template.paragraphs.join('\n\n'),
+        blocks: template.paragraphs.map((text) => ({
+          text,
+          kind: template.type === 'process' ? 'step' : 'question',
+          requiredFacts: [],
+        })),
+      }),
+    );
+  }
+  return created;
 }

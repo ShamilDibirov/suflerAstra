@@ -42,7 +42,7 @@ import {
   models,
   cancel,
 } from './conversations';
-import { saveDocument, publishDocument } from './knowledge';
+import { saveDocument, publishDocument, addSalesTemplates } from './knowledge';
 import { draftProcess, testModel } from './ai';
 import { putFile, getFile } from './storage';
 import { enqueueIngest, deleteConversation } from './infra';
@@ -54,7 +54,11 @@ export class ApiController {
     return { ok: true, service: 'sufler-api' };
   }
   @Get('config') publicConfig() {
-    return { demo: config.demo };
+    return {
+      demo: config.demo,
+      ragEnabled: config.ragEnabled,
+      defaultAssistanceMode: config.defaultAssistanceMode,
+    };
   }
   @Get('session') me(@Req() req: Request) {
     return session(req);
@@ -121,6 +125,8 @@ export class ApiController {
       id,
       z
         .object({
+          assistanceMode: z.enum(['rag', 'scripts']).optional(),
+          salesScriptId: z.string().nullable().optional(),
           modelId: z.string().optional(),
           autoHints: z.boolean().optional(),
           region: z.string().min(1).max(80).optional(),
@@ -267,6 +273,11 @@ export class ApiController {
     if (!d) throw new NotFoundException();
     return draftProcess(d.content);
   }
+  @Post('admin/sales-templates') async salesTemplates(@Req() req: Request) {
+    const user = await session(req);
+    assertAdmin(user);
+    return addSalesTemplates(user);
+  }
   @Post('admin/upload')
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 20 * 1024 * 1024 } }))
   async upload(@Req() req: Request, @UploadedFile() file: Express.Multer.File) {
@@ -276,6 +287,10 @@ export class ApiController {
     const ext = file.originalname.split('.').pop()?.toLowerCase();
     if (!['txt', 'md', 'pdf', 'docx', 'csv'].includes(ext || ''))
       throw new BadRequestException('Поддерживаются PDF, DOCX, MD, TXT и CSV');
+    if (!config.ragEnabled && (ext === 'pdf' || ext === 'docx'))
+      throw new BadRequestException(
+        'В режиме без RAG используйте текст, Markdown или CSV; PDF/DOCX предварительно преобразуйте в текст',
+      );
     const title = file.originalname.replace(/\.[^.]+$/, '');
     let content = 'Документ ожидает извлечения текста.';
     if (ext === 'txt' || ext === 'md') content = file.buffer.toString('utf-8');

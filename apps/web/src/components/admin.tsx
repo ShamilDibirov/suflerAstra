@@ -105,15 +105,18 @@ export function Admin({ section }: { section: string }) {
     [memberRole, setMemberRole] = useState('consultant'),
     [detail, setDetail] = useState<Conversation | null>(null),
     [statusFilter, setStatusFilter] = useState('all');
+  const [runtime, setRuntime] = useState({ ragEnabled: true });
   const fileRef = useRef<HTMLInputElement>(null);
   async function load() {
-    const [d, m, h, u, o] = await Promise.all([
+    const [d, m, h, u, o, settings] = await Promise.all([
       api<KnowledgeDocument[]>('/admin/documents'),
       api<ModelConfig[]>('/admin/models'),
       api<Conversation[]>('/admin/history'),
       api<Member[]>('/admin/users'),
       api<Overview>('/admin/overview'),
+      api<{ ragEnabled: boolean }>('/config'),
     ]);
+    setRuntime(settings);
     setDocs(d);
     setModels(m);
     setHistory(h);
@@ -217,7 +220,7 @@ export function Admin({ section }: { section: string }) {
                 ref={fileRef}
                 type="file"
                 hidden
-                accept=".pdf,.docx,.txt,.md,.csv"
+                accept={runtime.ragEnabled ? '.pdf,.docx,.txt,.md,.csv' : '.txt,.md,.csv'}
                 onChange={(e) => {
                   if (e.target.files?.[0]) void upload(e.target.files[0]);
                   e.target.value = '';
@@ -232,6 +235,20 @@ export function Admin({ section }: { section: string }) {
                 Создать {section === 'processes' ? 'процесс' : 'материал'}
               </Button>
             </>
+          )}
+          {['knowledge', 'processes'].includes(section) && (
+            <Button
+              variant="outline"
+              disabled={busy}
+              onClick={() =>
+                void run(async () => {
+                  await post('/admin/sales-templates');
+                  notify('Заготовки добавлены. Проверьте и опубликуйте скрипт и практики.');
+                })
+              }
+            >
+              Примеры продаж
+            </Button>
           )}
           {section === 'models' && (
             <Button onClick={() => setModelDialog(true)}>
@@ -256,6 +273,14 @@ export function Admin({ section }: { section: string }) {
           )}
         </div>
       </div>
+      {!runtime.ragEnabled && isDocs && (
+        <div className="info-banner" style={{ marginBottom: 16 }}>
+          Продажи без поиска по базе: создайте процесс с направлением «Продажи» для скрипта.
+          Практики добавляйте как статью с intent sales_best_practices. После проверки публикуйте
+          материалы. Для импорта доступны Markdown, TXT и CSV; PDF/DOCX предварительно преобразуйте
+          в текст.
+        </div>
+      )}
       {error && (
         <div role="alert" className="error-banner">
           {error}

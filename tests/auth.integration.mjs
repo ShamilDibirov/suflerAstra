@@ -61,6 +61,9 @@ try {
   const env = {
     ...process.env,
     DEMO_MODE: 'false',
+    RAG_ENABLED: 'false',
+    ASSISTANCE_MODE: 'scripts',
+    KNOWLEDGE_URL: 'http://127.0.0.1:1',
     NODE_ENV: 'test',
     DATABASE_URL: `postgresql://sufler:${secret}@127.0.0.1:${mapped}/sufler`,
     REDIS_URL: '',
@@ -194,6 +197,60 @@ try {
   });
   assert.equal(hint.status, 201);
   assert.equal(hint.body.kind, 'no_evidence');
+  assert.equal(
+    (await call('/api/admin/sales-templates', { cookie: staff, method: 'POST', body: {} })).status,
+    403,
+  );
+  const templates = await call('/api/admin/sales-templates', {
+    cookie: owner,
+    method: 'POST',
+    body: {},
+  });
+  assert.equal(templates.status, 201);
+  assert.equal(templates.body.length, 2);
+  const script = templates.body.find((d) => d.type === 'process');
+  const published = await call(`/api/admin/documents/${script.id}/status`, {
+    cookie: owner,
+    method: 'POST',
+    body: { status: 'published' },
+  });
+  assert.equal(published.status, 201, JSON.stringify(published.body));
+  assert.equal(published.body.indexedVersion, null);
+  const selected = await call(`/api/conversations/${a.id}`, {
+    cookie: staff,
+    method: 'PATCH',
+    body: { salesScriptId: script.id },
+  });
+  assert.equal(selected.status, 200, JSON.stringify(selected.body));
+  assert.equal(selected.body.hints.at(-1).blocks[0].blockId, script.blocks[0].id);
+  assert.equal(selected.body.hints.at(-1).inputTokens, 0);
+  const advanced = await call(`/api/conversations/${a.id}`, {
+    cookie: staff,
+    method: 'PATCH',
+    body: { completedStep: script.blocks[0].id },
+  });
+  assert.equal(advanced.status, 200);
+  assert.equal(advanced.body.hints.at(-1).blocks[0].blockId, script.blocks[1].id);
+  assert.equal(
+    (
+      await call(`/api/conversations/${a.id}`, {
+        cookie: staff,
+        method: 'PATCH',
+        body: { assistanceMode: 'rag' },
+      })
+    ).status,
+    400,
+  );
+  assert.equal(
+    (
+      await call(`/api/conversations/${b.id}`, {
+        cookie: other,
+        method: 'PATCH',
+        body: { salesScriptId: script.id },
+      })
+    ).status,
+    400,
+  );
   const wsStatus = (id, cookie, requestOrigin = origin) =>
     new Promise((resolve, reject) => {
       const ws = new WebSocket(`ws://127.0.0.1:${port}/api/live?conversationId=${id}`, {
@@ -220,7 +277,7 @@ try {
   assert.equal(await wsStatus(a.id, ''), 401);
   assert.equal(await wsStatus(a.id, staff, 'https://untrusted.example'), 401);
   console.log(
-    'PASS: PostgreSQL migration/bootstrap; password sign-in; no public sign-up; organization and role isolation; Origin checks; authorized/unauthorized WebSocket; grounded empty-base refusal.',
+    'PASS: PostgreSQL migration/bootstrap; password sign-in; no public sign-up; organization and role isolation; Origin checks; authorized/unauthorized WebSocket; grounded empty-base refusal; real-mode script publication without knowledge service; zero-token steps; role/tenant isolation for scripts.',
   );
 } catch (e) {
   console.error(e);

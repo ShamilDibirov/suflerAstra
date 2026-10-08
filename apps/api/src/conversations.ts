@@ -23,7 +23,7 @@ import {
 import { store } from './store';
 import { emit } from './events';
 import { classify, selectEvidence } from './ai';
-import { retrieve } from './knowledge';
+import { retrieve, scriptSources } from './knowledge';
 import { redis } from './infra';
 import { config } from './config';
 
@@ -100,6 +100,7 @@ export async function createConversation(user: SessionUser, modelId?: string) {
       selected.id,
       `Клиент №${String(history.length + 1).padStart(2, '0')}`,
     );
+    c.assistanceMode = config.defaultAssistanceMode;
     await store.put(user.orgId, 'conversation', c.id, c);
     update(c);
     return c;
@@ -180,8 +181,11 @@ async function classifyLatest(user: SessionUser, snapshot: Conversation) {
   const controller = new AbortController();
   classifiers.set(snapshot.id, controller);
   try {
-    const docs = (await store.list<KnowledgeDocument>(user.orgId, 'document')).filter((d) =>
-      isPublished(d, user.orgId),
+    const docs = (await store.list<KnowledgeDocument>(user.orgId, 'document')).filter(
+      (d) =>
+        isPublished(d, user.orgId) &&
+        ((snapshot.assistanceMode || config.defaultAssistanceMode) !== 'scripts' ||
+          (d.direction === 'sales' && d.intent !== 'sales_best_practices')),
     );
     const result = await classify(snapshot, docs, controller.signal);
     if (controller.signal.aborted) return;
@@ -194,8 +198,18 @@ async function classifyLatest(user: SessionUser, snapshot: Conversation) {
         return null;
       const next = invalidate(v);
       next.card = applyPatch(next.card, result.patch, v.segments, result.source);
+      const pinned =
+        (v.assistanceMode || config.defaultAssistanceMode) === 'scripts' && v.salesScriptId
+          ? docs.find((d) => d.id === v.salesScriptId && d.direction === 'sales')
+          : undefined;
+      if (pinned) {
+        next.card.intent = pinned.intent;
+        next.card.direction = 'sales';
+      }
       next.card.activeProcessId =
-        docs.find((d) => d.intent === next.card.intent && d.type === 'process')?.id || null;
+        pinned?.id ||
+        docs.find((d) => d.intent === next.card.intent && d.type === 'process')?.id ||
+        null;
       return { ...next, error: null };
     });
     if (!c) return;
@@ -218,6 +232,8 @@ export async function configureConversation(
   id: string,
   patch: {
     modelId?: string;
+    assistanceMode?: 'rag' | 'scripts';
+    salesScriptId?: string | null;
     autoHints?: boolean;
     region?: string;
     completedStep?: string;
@@ -225,10 +241,39 @@ export async function configureConversation(
     label?: string;
   },
 ) {
-  await requireConversation(user, id, true);
+  const current = await requireConversation(user, id, true);
+  if (patch.assistanceMode === 'rag' && !config.ragEnabled)
+    throw new BadRequestException('RAG отключён на этом сервере');
   if (patch.modelId && !(await models(user.orgId)).some((m) => m.id === patch.modelId && m.enabled))
     throw new BadRequestException('Модель недоступна');
   const docs = await store.list<KnowledgeDocument>(user.orgId, 'document');
+  const selectedScript = patch.salesScriptId
+    ? docs.find(
+        (d) =>
+          d.id === patch.salesScriptId &&
+          d.type === 'process' &&
+          d.direction === 'sales' &&
+          isPublished(d, user.orgId) &&
+          (d.region === 'Все регионы' ||
+            d.region === (patch.region || current.region || 'Все регионы')),
+      )
+    : undefined;
+  if (patch.salesScriptId && !selectedScript)
+    throw new BadRequestException('Выберите опубликованный скрипт продаж своего региона');
+  if (
+    patch.completedStep &&
+    (current.assistanceMode || config.defaultAssistanceMode) === 'scripts'
+  ) {
+    const sources = await scriptSources(current);
+    const nextStep = sources
+      .find((d) => d.type === 'process')
+      ?.blocks.find((b) => b.kind === 'step');
+    if (
+      nextStep?.id !== patch.completedStep ||
+      !nextStep.requiredFacts.every((f) => current.card.completedSteps.includes(f))
+    )
+      throw new BadRequestException('Подтвердите текущий шаг скрипта');
+  }
   if (
     patch.completedStep &&
     !docs.some(
@@ -247,6 +292,17 @@ export async function configureConversation(
     if (v.status !== 'active') throw new BadRequestException('Разговор завершён');
     const n = invalidate(v);
     if (patch.modelId) n.modelId = patch.modelId;
+    if (patch.assistanceMode) n.assistanceMode = patch.assistanceMode;
+    if (patch.salesScriptId !== undefined) {
+      n.salesScriptId = patch.salesScriptId;
+      n.card.activeProcessId = selectedScript?.id || null;
+      n.card.completedSteps = [];
+      n.card.shownOffers = [];
+      if (selectedScript) {
+        n.card.intent = selectedScript.intent;
+        n.card.direction = 'sales';
+      }
+    }
     if (patch.autoHints !== undefined) n.autoHints = patch.autoHints;
     if (patch.label) n.card.label = patch.label;
     if (patch.region) n.region = patch.region;
@@ -261,7 +317,7 @@ export async function configureConversation(
     return n;
   });
   if (c) update(c);
-  if (c && patch.completedStep) {
+  if (c && (patch.completedStep || patch.salesScriptId)) {
     await makeHint(user, id, '', true);
     return requireConversation(user, id, true);
   }
@@ -277,8 +333,14 @@ export async function makeHint(
   if (c.status !== 'active') throw new BadRequestException('Разговор завершён');
   if (!(await models(user.orgId)).some((m) => m.id === c.modelId && m.enabled))
     throw new BadRequestException('Модель отключена администратором');
+  const mode = c.assistanceMode || config.defaultAssistanceMode;
   const urgent = !manual
-    ? findUrgent(c, await store.list<KnowledgeDocument>(user.orgId, 'document'))
+    ? findUrgent(
+        c,
+        mode === 'scripts'
+          ? await scriptSources(c)
+          : await store.list<KnowledgeDocument>(user.orgId, 'document'),
+      )
     : undefined;
   if (!manual && !urgent && Date.now() - c.lastAutoHintAt < 8000) return null;
   generators.get(id)?.abort();
@@ -293,13 +355,34 @@ export async function makeHint(
       eligibleSegments(c.segments).at(-1)?.text || '',
       question,
     ].join(' ');
-    const docs = urgent ? [urgent.document] : await retrieve(user.orgId, query, c.region);
+    if (mode === 'rag' && !config.ragEnabled)
+      throw new BadRequestException('Переключите диалог на продажи по скрипту');
+    const docs = urgent
+      ? [urgent.document]
+      : mode === 'scripts'
+        ? await scriptSources(c)
+        : await retrieve(user.orgId, query, c.region);
+    const scriptStep =
+      mode === 'scripts' && !question
+        ? docs
+            .find((d) => d.type === 'process')
+            ?.blocks.find(
+              (b) =>
+                b.kind === 'step' &&
+                b.requiredFacts.every((f) => c.card.completedSteps.includes(f)),
+            )
+        : undefined;
+    const scriptDoc = scriptStep
+      ? docs.find((d) => d.blocks.some((b) => b.id === scriptStep.id))
+      : undefined;
     const hash = createHash('sha256')
       .update(
         JSON.stringify({
           org: user.orgId,
           context: compactContext(c.card, c.segments),
           model: c.modelId,
+          mode,
+          script: c.salesScriptId,
           question,
           versions: docs.map((d) => [d.id, d.version]),
         }),
@@ -312,9 +395,15 @@ export async function makeHint(
           inputTokens: 0,
           outputTokens: 0,
         }
-      : cached
-        ? (JSON.parse(cached) as Awaited<ReturnType<typeof selectEvidence>>)
-        : await selectEvidence(c, docs, question, controller.signal);
+      : scriptStep && scriptDoc
+        ? {
+            selection: [{ documentId: scriptDoc.id, blockId: scriptStep.id }],
+            inputTokens: 0,
+            outputTokens: 0,
+          }
+        : cached
+          ? (JSON.parse(cached) as Awaited<ReturnType<typeof selectEvidence>>)
+          : await selectEvidence(c, docs, question, controller.signal);
     if (!cached && redis)
       await redis.set(`hint:${user.orgId}:${id}:${hash}`, JSON.stringify(selected), 'EX', 60);
     if (controller.signal.aborted) return null;
@@ -339,6 +428,7 @@ export async function makeHint(
         c.region,
       );
       const hint = renderHint(c.card, refs, c.modelId, {
+        ...(scriptStep ? { title: 'Следующий шаг скрипта' } : {}),
         latencyMs: Date.now() - start,
         inputTokens: cached ? 0 : selected.inputTokens,
         outputTokens: cached ? 0 : selected.outputTokens,
