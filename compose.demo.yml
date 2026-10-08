@@ -1,0 +1,16 @@
+name: sufler-demo
+services:
+  api:
+    build: {context: ., dockerfile: apps/api/Dockerfile}
+    environment:
+      DEMO_MODE: 'true'
+      ALLOW_PUBLIC_DEMO: 'true'
+      APP_ORIGIN: http://localhost:8080
+    restart: unless-stopped
+  web:
+    build: {context: ., dockerfile: apps/web/Dockerfile}
+    restart: unless-stopped
+  gateway:
+    build: {context: ., dockerfile: deploy/Dockerfile.gateway}
+    ports: ['127.0.0.1:8080:8080']
+    depends_on: [api, web]

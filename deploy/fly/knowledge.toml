@@ -1,0 +1,11 @@
+app = "sufler-knowledge-your-team"
+primary_region = "ams"
+[build]
+  dockerfile = "services/knowledge/Dockerfile"
+[mounts]
+  source = "knowledge_models"
+  destination = "/models"
+[[vm]]
+  memory = "8gb"
+  cpus = 2
+  cpu_kind = "performance"

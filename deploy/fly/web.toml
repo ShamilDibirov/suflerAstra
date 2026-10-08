@@ -1,0 +1,12 @@
+app = "sufler-web-your-team"
+primary_region = "ams"
+[build]
+  dockerfile = "apps/web/Dockerfile"
+[env]
+  HOSTNAME = "::"
+  PORT = "3000"
+  API_INTERNAL_URL = "http://sufler-api-your-team.internal:4000"
+[[vm]]
+  memory = "512mb"
+  cpus = 1
+  cpu_kind = "shared"

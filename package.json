@@ -1,0 +1,27 @@
+{
+  "name": "sufler",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@9.15.1",
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c magenta,cyan \"pnpm --filter @sufler/api dev\" \"pnpm --filter @sufler/web dev\"",
+    "build": "pnpm --filter @sufler/api build && pnpm --filter @sufler/web build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "vitest run",
+    "db:migrate": "pnpm --filter @sufler/api db:migrate",
+    "bootstrap": "pnpm --filter @sufler/api bootstrap",
+    "eval": "pnpm --filter @sufler/api eval",
+    "check:providers": "pnpm --filter @sufler/api check:providers",
+    "test:integration": "pnpm --filter @sufler/api build && node tests/auth.integration.mjs",
+    "test:rag:integration": "node tests/weaviate.integration.mjs",
+    "setup:env": "node scripts/init-env.mjs",
+    "format": "prettier --write apps/api/src apps/web/src packages/shared/src tests scripts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "concurrently": "^9.2.1",
+    "prettier": "3.6.2",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}

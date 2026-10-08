@@ -1,0 +1,15 @@
+app = "sufler-speech-your-team"
+primary_region = "ams"
+[build]
+  dockerfile = "services/speech/Dockerfile"
+[env]
+  SPEECH_MAX_SESSIONS = "10"
+  TORCH_THREADS = "2"
+  STAFF_SIMILARITY_THRESHOLD = "0.65"
+[mounts]
+  source = "speech_models"
+  destination = "/models"
+[[vm]]
+  memory = "4gb"
+  cpus = 2
+  cpu_kind = "performance"

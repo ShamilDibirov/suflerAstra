@@ -1,0 +1,8 @@
+fastapi==0.135.1
+uvicorn[standard]==0.41.0
+httpx==0.28.1
+sentence-transformers==6.1.0
+docling==2.135.0
+
+torch==2.8.0+cpu
+torchvision==0.23.0+cpu

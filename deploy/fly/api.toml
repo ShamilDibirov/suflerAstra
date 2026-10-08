@@ -1,0 +1,19 @@
+app = "sufler-api-your-team"
+primary_region = "ams"
+[build]
+  dockerfile = "apps/api/Dockerfile"
+[env]
+  HOST = "::"
+  PORT = "4000"
+  DEMO_MODE = "false"
+  APP_ORIGIN = "https://sufler-your-team.fly.dev"
+  SPEECH_URL = "http://sufler-speech-your-team.internal:8001"
+  KNOWLEDGE_URL = "http://sufler-knowledge-your-team.internal:8002"
+  S3_BUCKET = "sufler"
+  S3_REGION = "us-east-1"
+[deploy]
+  release_command = "node dist/cli.js migrate"
+[[vm]]
+  memory = "1gb"
+  cpus = 1
+  cpu_kind = "shared"

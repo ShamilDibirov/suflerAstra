@@ -1,0 +1,16 @@
+{
+  auto_https off
+}
+:8080 {
+  request_body {
+    max_size 22MB
+  }
+  handle /api/* {
+    reverse_proxy {$API_UPSTREAM:api:4000} {
+      flush_interval -1
+    }
+  }
+  handle {
+    reverse_proxy {$WEB_UPSTREAM:web:3000}
+  }
+}

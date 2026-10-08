@@ -1,0 +1,49 @@
+{
+  "name": "@sufler/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch --env-file-if-exists=../../.env src/main.ts",
+    "build": "tsup",
+    "start": "node dist/main.js",
+    "typecheck": "tsc --noEmit",
+    "db:migrate": "tsx --env-file-if-exists=../../.env src/cli.ts migrate",
+    "bootstrap": "tsx --env-file-if-exists=../../.env src/cli.ts bootstrap",
+    "eval": "tsx --env-file-if-exists=../../.env src/cli.ts eval",
+    "check:providers": "tsx --env-file-if-exists=../../.env src/cli.ts check"
+  },
+  "dependencies": {
+    "@sufler/shared": "workspace:*",
+    "@nestjs/common": "12.1.2",
+    "@nestjs/core": "12.1.2",
+    "@nestjs/platform-express": "12.1.2",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2",
+    "better-auth": "1.7.7",
+    "pg": "^8.20.0",
+    "ai": "7.0.130",
+    "@openrouter/ai-sdk-provider": "3.1.0",
+    "zod": "^4.3.6",
+    "ioredis": "^5.10.0",
+    "bullmq": "^5.71.0",
+    "@aws-sdk/client-s3": "^3.1000.0",
+    "@aws-sdk/s3-request-presigner": "^3.1000.0",
+    "ws": "^8.19.0",
+    "express": "^5.2.1",
+    "helmet": "^8.1.0",
+    "multer": "^2.1.0",
+    "csv-parse": "^6.1.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0",
+    "tsup": "^8.5.1",
+    "@types/pg": "^8.18.0",
+    "@types/ws": "^8.18.1",
+    "@types/express": "^5.0.6",
+    "@types/multer": "^2.0.0"
+  },
+  "files": [
+    "dist"
+  ]
+}

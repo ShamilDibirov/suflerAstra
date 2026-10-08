@@ -1,0 +1,14 @@
+fastapi==0.135.1
+uvicorn[standard]==0.41.0
+numpy==1.26.4
+torch==2.5.1+cu124
+torchaudio==2.5.1+cu124
+pyannote.audio==3.3.2
+diart==0.9.2
+silero-vad==6.2.3
+mistralai[realtime]==3.1.0
+onnxruntime==1.23.2
+huggingface-hub<1
+torchvision==0.20.1+cu124
+# pyannote.core 5 uses matplotlib.cm.get_cmap, removed in newer Matplotlib.
+matplotlib==3.8.4

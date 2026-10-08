@@ -1,0 +1,2 @@
+FROM dxflrs/garage:v2.4.1
+COPY deploy/garage.toml /etc/garage.toml

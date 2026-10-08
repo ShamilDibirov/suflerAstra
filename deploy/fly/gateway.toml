@@ -1,0 +1,23 @@
+app = "sufler-your-team"
+primary_region = "ams"
+[build]
+  dockerfile = "deploy/Dockerfile.gateway"
+[env]
+  API_UPSTREAM = "sufler-api-your-team.internal:4000"
+  WEB_UPSTREAM = "sufler-web-your-team.internal:3000"
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+[[http_service.checks]]
+  grace_period = "15s"
+  interval = "30s"
+  method = "GET"
+  timeout = "5s"
+  path = "/api/health"
+[[vm]]
+  memory = "256mb"
+  cpus = 1
+  cpu_kind = "shared"
