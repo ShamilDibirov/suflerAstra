@@ -132,6 +132,34 @@ describe('server authorization and asynchronous state', () => {
     expect(next.card.shownOffers).toEqual([]);
     expect((await requireConversation(user, c.id)).status).toBe('completed');
   });
+  it('refreshes an automatic hint when an independent classifier changes despite unchanged main intent', async () => {
+    const c = await createConversation(user);
+    const script = docs.find((d) => d.direction === 'sales' && d.type === 'process')!;
+    await configureConversation(user, c.id, {
+      assistanceMode: 'scripts',
+      salesScriptId: script.id,
+      autoHints: true,
+    });
+    vi.mocked(assistantResponse).mockClear();
+    vi.mocked(assistantResponse).mockResolvedValueOnce({
+      parts: [{ kind: 'advice', text: 'Уточните, насколько срочно клиенту нужно подключение.' }],
+      inputTokens: 10,
+      outputTokens: 5,
+    });
+    vi.mocked(classify).mockResolvedValueOnce({
+      ...classification,
+      patch: {
+        ...classification.patch,
+        shouldHint: false,
+        labels: [
+          { key: 'urgency', name: 'Срочность', value: 'today', label: 'Сегодня', confidence: 0.99 },
+        ],
+      },
+    });
+    await addSegment(user, c.id, segment('Мне нужно подключение сегодня'));
+    await vi.waitFor(() => expect(assistantResponse).toHaveBeenCalled());
+    expect(vi.mocked(assistantResponse).mock.calls.at(-1)![0].card.labels?.[0].value).toBe('today');
+  });
   it('discards a late classification after manual correction', async () => {
     let resolve!: (v: typeof classification) => void;
     vi.mocked(classify).mockReturnValueOnce(new Promise((r) => (resolve = r)));
@@ -205,8 +233,27 @@ describe('server authorization and asynchronous state', () => {
       s = segment();
     await addSegment(user, c.id, s);
     await waitForClassification(c.id);
+    await store.mutateConversation(user.orgId, c.id, (v) => ({
+      ...v,
+      card: {
+        ...v.card,
+        labels: [
+          {
+            key: 'known',
+            name: 'Known',
+            value: 'yes',
+            label: 'Yes',
+            confidence: 0.99,
+            retained: true,
+            ruleSignature: 'old',
+          },
+        ],
+      },
+    }));
     await editSegment(user, c.id, s.id, { role: 'bystander', excluded: true });
-    expect((await requireConversation(user, c.id)).card.facts).toEqual([]);
+    const corrected = await requireConversation(user, c.id);
+    expect(corrected.card.facts).toEqual([]);
+    expect(corrected.card.labels).toEqual([]);
   });
   it('rechecks publication after model latency', async () => {
     const c = await createConversation(user);

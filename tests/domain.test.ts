@@ -160,3 +160,22 @@ it('keeps recent speech and valid JSON when the context budget is exhausted', ()
   expect(parsed.recent.at(-1).id).toBe('s29');
   expect(parsed.card.facts.length).toBeGreaterThan(0);
 });
+
+it('keeps all classifier results and recent speech in the joint assistant context', () => {
+  const card = emptyCard('c');
+  card.labels = Array.from({ length: 32 }, (_, i) => ({
+    key: `group_${i}`,
+    name: `Classifier ${i}`,
+    value: 'known',
+    label: 'x'.repeat(100),
+    confidence: 0.95,
+  }));
+  const segments = Array.from({ length: 10 }, (_, i) =>
+    segment({ id: `s${i}`, text: 'Latest speech '.repeat(35) }),
+  );
+  const context = JSON.parse(compactContext(card, segments));
+  expect(context.card.labels).toHaveLength(32);
+  expect(context.recent.length).toBeGreaterThan(1);
+  expect(context.recent.at(-1).id).toBe('s9');
+  expect(context.card.intent).toBe('unknown');
+});

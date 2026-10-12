@@ -30,12 +30,14 @@ export const ClassificationLabel = z.object({
   value: z.string().max(60),
   label: z.string().max(100),
   confidence: z.number().min(0).max(1),
+  retained: z.boolean().optional(),
+  ruleSignature: z.string().max(40).optional(),
 });
 export const PatchSchema = z.object({
   direction: Direction,
   intent: z.string().max(100),
   intentLabel: z.string().max(100).optional(),
-  labels: z.array(ClassificationLabel).max(8).default([]),
+  labels: z.array(ClassificationLabel).max(32).default([]),
   secondaryIntents: z.array(z.string()).max(5).default([]),
   stage: Stage,
   needs: z.array(z.string().max(100)).max(6).default([]),
@@ -412,6 +414,7 @@ export const ClassificationInput = z
           instructions: z.string().trim().min(1).max(800),
           enabled: z.boolean().default(true),
           type: z.enum(['choice', 'noul', 'score']).optional(),
+          remember: z.boolean().optional(),
           threshold: z.number().min(0.5).max(0.99).optional(),
           trueWhen: z.string().trim().max(800).optional(),
           falseWhen: z.string().trim().max(800).optional(),
@@ -429,7 +432,7 @@ export const ClassificationInput = z
             .default([]),
         }),
       )
-      .max(8)
+      .max(32)
       .default([]),
   })
   .superRefine((v, ctx) => {

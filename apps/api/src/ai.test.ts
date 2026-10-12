@@ -10,6 +10,7 @@ import {
   inferBoundary,
   assistantResponse,
   playgroundDecision,
+  playgroundDecisions,
 } from './ai';
 import { newConversation } from '@sufler/shared/engine';
 import { demoDocuments } from '@sufler/shared/demo';
@@ -372,6 +373,13 @@ it('uses organization Decision model, rules and custom label choices, rejecting 
 
 it('gives chat a richer answer contract and real message memory while automatic hints stay concise', async () => {
   const c = card();
+  c.card.labels = Array.from({ length: 12 }, (_, i) => ({
+    key: `classifier_${i}`,
+    name: `Признак ${i}`,
+    value: 'confirmed',
+    label: `Значение ${i}`,
+    confidence: 0.95,
+  }));
   c.messages = [
     {
       id: 'm1',
@@ -400,6 +408,7 @@ it('gives chat a richer answer contract and real message memory while automatic 
   const chat = vi.mocked(generateText).mock.calls.at(-1)![0];
   expect(chat.maxOutputTokens).toBe(1800);
   expect(JSON.parse(chat.prompt as string).chat).toHaveLength(2);
+  expect(JSON.parse(chat.prompt as string).context.card.labels).toEqual(c.card.labels);
   expect(chat.system).toContain('Не ограничивай чат одной подсказкой');
   await assistantResponse(
     c,
@@ -410,7 +419,9 @@ it('gives chat a richer answer contract and real message memory while automatic 
     undefined,
     'hint',
   );
-  expect(vi.mocked(generateText).mock.calls.at(-1)![0].maxOutputTokens).toBe(450);
+  const hint = vi.mocked(generateText).mock.calls.at(-1)![0];
+  expect(hint.maxOutputTokens).toBe(450);
+  expect(JSON.parse(hint.prompt as string).context.card.labels).toEqual(c.card.labels);
 });
 
 it('playground sends one real typed decision, masks PII and preserves provider distributions without fallback', async () => {
@@ -504,4 +515,120 @@ it('live classification stores binary and fractional rubric results from the sam
   const body = JSON.parse(fetchMock.mock.calls[0][1].body);
   expect(body.questions.label_0.criteria).toEqual({ true: 'Дорого', false: 'Согласие' });
   expect(body.questions.label_1.criteria).toEqual(['Нет', 'Выбирает', 'Да']);
+});
+
+it('runs a whole bundle in one HTTP request and returns all independent results together', async () => {
+  const rules = Array.from({ length: 24 }, (_, i) => ({
+    id: `group_${i}`,
+    name: `Group ${i}`,
+    instructions: 'Choose',
+    enabled: true,
+    choices: [
+      { id: 'a', name: 'A', description: 'Case A' },
+      { id: 'b', name: 'B', description: 'Case B' },
+    ],
+  }));
+  fetchMock.mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        answers: Object.fromEntries(
+          rules.map((r) => [
+            r.id,
+            { type: 'choice', choice: 'a', confidence: 0.98, probabilities: { a: 0.98, b: 0.02 } },
+          ]),
+        ),
+      }),
+    ),
+  );
+  const result = await playgroundDecisions(
+    { ...DEFAULT_CLASSIFICATION, groups: rules, revision: 0, updatedAt: null },
+    rules,
+    'Клиент: Хочу оформить',
+  );
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(Object.keys(JSON.parse(fetchMock.mock.calls[0][1].body).questions)).toHaveLength(24);
+  expect(result.results).toHaveLength(24);
+  expect(result.results.every((r) => r.label.value === 'a')).toBe(true);
+});
+
+it('live analysis runs all enabled classifiers at once, even when a different editor is open', async () => {
+  const rules = Array.from({ length: 12 }, (_, i) => ({
+    id: `group_${i}`,
+    name: `Group ${i}`,
+    instructions: 'Choose',
+    enabled: true,
+    choices: [
+      { id: 'a', name: 'A', description: 'Case A' },
+      { id: 'b', name: 'B', description: 'Case B' },
+    ],
+  }));
+  const settings = {
+    ...DEFAULT_CLASSIFICATION,
+    revision: 1,
+    updatedAt: null,
+    groups: [...rules, { ...rules[0], id: 'disabled', enabled: false }],
+  };
+  fetchMock.mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        ...response(),
+        answers: {
+          ...response().answers,
+          ...Object.fromEntries(
+            rules.map((r, i) => [
+              `label_${i}`,
+              { type: 'choice', choice: i % 2 ? 'b' : 'a', confidence: 0.98 },
+            ]),
+          ),
+        },
+      }),
+    ),
+  );
+  const result = await classify(
+    card(),
+    demoDocuments('org'),
+    new AbortController().signal,
+    'decision',
+    undefined,
+    settings,
+  );
+  expect(result.patch.labels).toHaveLength(12);
+  expect(result.patch.labels.map((v) => v.value)).toEqual(rules.map((_, i) => (i % 2 ? 'b' : 'a')));
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+  expect(Object.keys(body.questions).filter((v) => v.startsWith('label_'))).toHaveLength(12);
+});
+
+it('preserves confirmed independent decision results when uncertain core intent uses the fallback', async () => {
+  const rule = {
+    id: 'use_case',
+    name: 'Сценарий',
+    instructions: 'Choose',
+    enabled: true,
+    choices: [
+      { id: 'home', name: 'Дома', description: 'Home' },
+      { id: 'work', name: 'Работа', description: 'Work' },
+    ],
+  };
+  fetchMock.mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        ...response(0.5),
+        answers: {
+          ...response(0.5).answers,
+          label_0: { type: 'choice', choice: 'home', confidence: 0.99 },
+        },
+      }),
+    ),
+  );
+  const result = await classify(
+    card(),
+    demoDocuments('org'),
+    new AbortController().signal,
+    'pipeline',
+    undefined,
+    { ...DEFAULT_CLASSIFICATION, groups: [rule], revision: 0, updatedAt: null },
+  );
+  expect(result.source).toBe('qwen');
+  expect(result.patch.labels[0].value).toBe('home');
 });

@@ -2572,3 +2572,67 @@ kbd {
   cursor: pointer;
   font-weight: 600;
 }
+.classifier-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(235px, 1fr));
+  gap: 12px;
+}
+.classifier-item {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid #eae5f2;
+  border-radius: 12px;
+  min-width: 0;
+  background: #faf9fd;
+}
+.classifier-item.selected {
+  border-color: #8962db;
+  box-shadow: 0 0 0 1px #8962db;
+}
+.classifier-item p {
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.classifier-item small {
+  color: #807789;
+  font-size: 11px;
+}
+.classifier-summary {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  background: #f3edff;
+  border-radius: 12px;
+}
+.classifier-summary > div {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 10px;
+  font-size: 12px;
+  padding: 8px 0;
+  border-top: 1px solid #ded5eb;
+}
+@media (max-width: 650px) {
+  .classifier-list {
+    grid-template-columns: 1fr;
+  }
+  .classifier-summary > div {
+    grid-template-columns: 1fr;
+  }
+}
+.classifier-item strong,
+.classifier-summary span,
+.classifier-summary strong {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.classifier-summary > div {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+}
+@media (max-width: 650px) {
+  .classifier-summary > div {
+    grid-template-columns: 1fr;
+  }
+}

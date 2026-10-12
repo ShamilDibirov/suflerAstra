@@ -8,6 +8,7 @@ import {
   decisionQuestion,
   decisionLabel,
   decisionPassed,
+  accumulateDecisionLabels,
   type DecisionRule,
 } from '../packages/shared/src/decisions';
 const base: DecisionRule = {
@@ -107,5 +108,64 @@ describe('decision builder live contract', () => {
       ),
     ).toThrow();
     expect(() => ClassificationInput.parse(input({ ...base, choices: [] }))).toThrow();
+  });
+});
+
+describe('independent classifiers and optional memory', () => {
+  it('combines different classifiers by key, preserves known values only when enabled, and accepts corrections', () => {
+    const sticky = { ...base, id: 'device', remember: true };
+    const current = { ...base, id: 'need', remember: false };
+    const first = accumulateDecisionLabels(
+      [sticky, current],
+      [
+        decisionLabel(sticky, { type: 'choice', choice: 'a', confidence: 0.97 }, 0.85),
+        decisionLabel(current, { type: 'choice', choice: 'b', confidence: 0.96 }, 0.85),
+      ],
+      [],
+    );
+    const next = accumulateDecisionLabels([sticky, current], [], first);
+    expect(next.map((v) => v.value)).toEqual(['a', 'unknown']);
+    expect(next[0]).toHaveProperty('retained', true);
+    const corrected = accumulateDecisionLabels(
+      [sticky, current],
+      [decisionLabel(sticky, { type: 'choice', choice: 'b', confidence: 0.99 }, 0.85)],
+      first,
+    );
+    expect(corrected[0].value).toBe('b');
+    expect(corrected[0]).not.toHaveProperty('retained');
+    expect(accumulateDecisionLabels([{ ...sticky, enabled: false }], [], first)).toEqual([]);
+    expect(
+      accumulateDecisionLabels([{ ...sticky, instructions: 'A different question' }], [], first)[0]
+        .value,
+    ).toBe('unknown');
+    expect(accumulateDecisionLabels([{ ...sticky, threshold: 0.99 }], [], first)[0].value).toBe(
+      'unknown',
+    );
+    expect(accumulateDecisionLabels([sticky], [], [])[0].value).toBe('unknown');
+  });
+  it('stores 32 independent classifiers without collapsing them into intent', () => {
+    const rules = Array.from({ length: 32 }, (_, i) => ({ ...base, id: `group_${i}` }));
+    expect(
+      ClassificationInput.parse({ ...DEFAULT_CLASSIFICATION, groups: rules }).groups,
+    ).toHaveLength(32);
+    const labels = rules.map((g) =>
+      decisionLabel(g, { type: 'choice', choice: 'a', confidence: 0.99 }, 0.85),
+    );
+    expect(
+      PatchSchema.parse({
+        direction: 'sales',
+        intent: 'tariff_selection',
+        stage: 'offer',
+        confidence: 0.95,
+        shouldHint: true,
+        labels,
+      }).labels,
+    ).toHaveLength(32);
+    expect(() =>
+      ClassificationInput.parse({
+        ...DEFAULT_CLASSIFICATION,
+        groups: [...rules, { ...base, id: 'one_more' }],
+      }),
+    ).toThrow();
   });
 });

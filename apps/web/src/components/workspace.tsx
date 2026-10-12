@@ -943,8 +943,12 @@ export function Workspace() {
                   <dt>Признаки обращения</dt>
                   <dd className="context-needs">
                     {card.labels.map((v) => (
-                      <span key={v.key} title={`Уверенность: ${Math.round(v.confidence * 100)}%`}>
+                      <span
+                        key={v.key}
+                        title={`${v.retained ? 'Сохранённая предыдущая оценка · ' : ''}Уверенность: ${Math.round(v.confidence * 100)}%`}
+                      >
                         {v.name}: <strong>{v.label}</strong>
+                        {v.retained && <small> · сохранено</small>}
                       </span>
                     ))}
                   </dd>

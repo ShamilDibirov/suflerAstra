@@ -92,3 +92,48 @@ export function decisionPassed(
       ? answer.score >= (rule.scoreThreshold ?? 1)
       : true;
 }
+
+// This is a change detector, not a security hash. Memory cannot survive a changed rubric.
+function ruleSignature(rule: DecisionRule) {
+  const text = JSON.stringify(decisionQuestion(rule));
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 16777619);
+  return `v1_${(hash >>> 0).toString(16)}`;
+}
+// Unknown cannot erase a remembered confident value; a confident correction replaces it.
+export function accumulateDecisionLabels(
+  rules: DecisionRule[],
+  labels: ReturnType<typeof decisionLabel>[],
+  previous: (ReturnType<typeof decisionLabel> & { retained?: boolean; ruleSignature?: string })[],
+  defaultThreshold = 0.85,
+) {
+  return rules
+    .filter((g) => g.enabled)
+    .map((g) => {
+      const next =
+        labels.find((v) => v.key === g.id) || decisionLabel(g, undefined, defaultThreshold);
+      const signature = ruleSignature(g);
+      const old = previous.find((v) => v.key === g.id);
+      if (
+        g.remember &&
+        next.value === 'unknown' &&
+        old?.ruleSignature === signature &&
+        old.value !== 'unknown'
+      ) {
+        let answer: DecisionAnswer | undefined;
+        if ((g.type || 'choice') === 'choice')
+          answer = { type: 'choice', choice: old.value, confidence: old.confidence };
+        else if (g.type === 'noul' && ['true', 'false'].includes(old.value))
+          answer = {
+            type: 'noul',
+            noul: old.value === 'true' ? old.confidence : 1 - old.confidence,
+          };
+        else if (g.type === 'score' && Number.isFinite(Number(old.value)))
+          answer = { type: 'score', score: Number(old.value), confidence: old.confidence };
+        const remembered = decisionLabel(g, answer, defaultThreshold);
+        if (remembered.value !== 'unknown')
+          return { ...remembered, ruleSignature: signature, retained: true };
+      }
+      return g.remember && next.value !== 'unknown' ? { ...next, ruleSignature: signature } : next;
+    });
+}

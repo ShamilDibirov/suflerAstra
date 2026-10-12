@@ -45,7 +45,7 @@ import { config } from './config';
 import { getPrompts, savePrompts } from './prompts';
 import { getClassification, saveClassification, classificationIntents } from './classification';
 import { chatAnswer } from './assistant';
-import { classify, playgroundDecision } from './ai';
+import { classify, playgroundDecision, playgroundDecisions } from './ai';
 import {
   ClassificationInput,
   SegmentSchema as TestSegmentSchema,
@@ -307,14 +307,14 @@ export class ApiController {
       .object({
         transcript: z.string().trim().min(1).max(8000),
         settings: ClassificationInput,
-        target: z.enum(['intent', 'rule']),
+        target: z.enum(['intent', 'rule', 'all']),
         ruleId: z.string().optional(),
       })
       .parse(body);
     const saved = await getClassification(user.orgId);
     const settings = { ...input.settings, revision: saved.revision, updatedAt: saved.updatedAt };
     let rule = settings.groups.find((g) => g.id === input.ruleId);
-    if (input.target === 'intent') {
+    if (input.target === 'intent' || input.target === 'all') {
       const docs = (await store.list<KnowledgeDocument>(user.orgId, 'document')).filter((d) =>
         isPublished(d, user.orgId),
       );
@@ -335,6 +335,13 @@ export class ApiController {
       };
     }
     if (!rule) throw new BadRequestException('Выберите существующий вопрос');
+    if (input.target === 'all') {
+      return playgroundDecisions(
+        settings,
+        [{ ...rule, id: '_primary_intent' }, ...settings.groups.filter((g) => g.enabled)],
+        input.transcript,
+      );
+    }
     return playgroundDecision(settings, rule, input.transcript);
   }
 

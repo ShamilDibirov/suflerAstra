@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
-import { Plus, Play, Trash2 } from 'lucide-react';
+import { Plus, Play, Trash2, Copy } from 'lucide-react';
 import type { ClassificationSettings } from '@sufler/shared';
 import {
   decisionQuestion,
@@ -18,7 +18,13 @@ const names: Record<Kind, string> = {
   score: 'Оценка по шкале',
 };
 export function ruleTemplate(type: Kind): DecisionRule {
-  const base = { id: `rule_${Date.now()}`, enabled: true, threshold: 0.85, choices: [], type };
+  const base = {
+    id: `rule_${crypto.randomUUID().replaceAll('-', '').slice(0, 20)}`,
+    enabled: true,
+    threshold: 0.85,
+    choices: [],
+    type,
+  };
   if (type === 'noul')
     return {
       ...base,
@@ -66,6 +72,13 @@ type TestResult = {
   label: { value: string; label: string; confidence: number } | null;
   demo: boolean;
   latencyMs: number;
+  results: {
+    id: string;
+    name: string;
+    type: Kind;
+    answer: DecisionAnswer | null;
+    label: { value: string; label: string; confidence: number };
+  }[];
 };
 export function DecisionPlayground({
   settings,
@@ -76,7 +89,7 @@ export function DecisionPlayground({
   published: ClassificationSettings['intents'];
   change: (values: Partial<ClassificationSettings>) => void;
 }) {
-  const [selected, setSelected] = useState('intent');
+  const [selected, setSelected] = useState('__primary');
   const [state, setState] = useState(
     'Клиент: Нужна сим-карта для роутера на даче.\nКонсультант: Какой бюджет?\nКлиент: До 500 рублей, хочу оформить сегодня.',
   );
@@ -89,7 +102,7 @@ export function DecisionPlayground({
     setResult(null);
     setError('');
     setBusy(false);
-  }, [settings, state, selected]);
+  }, [settings, state]);
   const intentOptions = Object.fromEntries(published.map((v) => [v.id, v]));
   for (const v of settings.intents) {
     if (v.enabled) intentOptions[v.id] = v;
@@ -128,12 +141,17 @@ export function DecisionPlayground({
     change({ groups: [...settings.groups, g] });
     setSelected(g.id);
   };
-  const question = decisionQuestion(rule);
+  const currentResult = result?.results.find((v) =>
+    index < 0 ? ['_primary_intent', 'intent'].includes(v.id) : v.id === rule.id,
+  );
+  const selectedResult = currentResult
+    ? { ...result!, answer: currentResult.answer, label: currentResult.label }
+    : null;
   const probability =
-    result?.answer?.type === 'noul'
-      ? { false: 1 - result.answer.noul, true: result.answer.noul }
-      : result?.answer && 'probabilities' in result.answer
-        ? result.answer.probabilities
+    selectedResult?.answer?.type === 'noul'
+      ? { false: 1 - selectedResult.answer.noul, true: selectedResult.answer.noul }
+      : selectedResult?.answer && 'probabilities' in selectedResult.answer
+        ? selectedResult.answer.probabilities
         : undefined;
   const options: [string, string][] =
     type === 'choice'
@@ -144,8 +162,8 @@ export function DecisionPlayground({
             ['true', 'Да'],
           ]
         : (rule.levels || []).map((v, i) => [String(i), `${i} · ${v}`]);
-  const passed = decisionPassed(rule, result?.answer || undefined, settings.threshold);
-  const test = async () => {
+  const passed = decisionPassed(rule, selectedResult?.answer || undefined, settings.threshold);
+  const test = async (all = true) => {
     const current = ++generation.current;
     setBusy(true);
     setError('');
@@ -154,7 +172,7 @@ export function DecisionPlayground({
       const r = await post<TestResult>('/admin/classification/playground', {
         settings,
         transcript: state,
-        target: index < 0 ? 'intent' : 'rule',
+        target: all ? 'all' : index < 0 ? 'intent' : 'rule',
         ruleId: rule.id,
       });
       if (current === generation.current) setResult(r);
@@ -169,28 +187,88 @@ export function DecisionPlayground({
     <section className="panel settings-panel decision-builder">
       <div className="settings-heading">
         <div>
-          <h2>Конструктор решений</h2>
+          <h2>
+            Набор классификаторов · {settings.groups.filter((g) => g.enabled).length + 1} включено
+          </h2>
           <p className="muted">
-            Задайте вопрос, перечислите ответы и объясните, когда выбирать каждый. Результат
-            сохранится в карточке клиента и станет доступен ассистенту.
+            Все включённые классификаторы анализируют разговор одновременно. Каждый возвращает свой
+            результат: сценарий, возражения, готовность купить и другие признаки складываются в
+            общую карточку. Выбор ниже открывает редактор, а не переключает активный классификатор.
           </p>
         </div>
       </div>
-      <label>
-        Какой вопрос настраиваем
-        <select
-          value={index < 0 ? 'intent' : selected}
-          onChange={(e) => setSelected(e.target.value)}
-        >
-          <option value="intent">Намерение клиента · основные категории</option>
-          {settings.groups.map((g) => (
-            <option key={g.id} value={g.id}>
-              {g.name}
-              {g.enabled ? '' : ' · выключен'}
-            </option>
-          ))}
-        </select>
-      </label>
+      <div className="classifier-list" aria-label="Все классификаторы">
+        <article className={`classifier-item ${index < 0 ? 'selected' : ''}`}>
+          <strong>Намерение клиента</strong>
+          <small>Основные категории · всегда включён</small>
+          <Button type="button" variant="ghost" size="sm" onClick={() => setSelected('__primary')}>
+            Редактировать намерения
+          </Button>
+        </article>
+        {settings.groups.map((g) => (
+          <article key={g.id} className={`classifier-item ${selected === g.id ? 'selected' : ''}`}>
+            <label className="check-label">
+              <input
+                type="checkbox"
+                checked={g.enabled}
+                onChange={(e) =>
+                  change({
+                    groups: settings.groups.map((v) =>
+                      v.id === g.id ? { ...v, enabled: e.target.checked } : v,
+                    ),
+                  })
+                }
+              />
+              <strong>{g.name || 'Новый классификатор'}</strong>
+            </label>
+            <small>
+              {names[g.type || 'choice']} · порог{' '}
+              {Math.round((g.threshold ?? settings.threshold) * 100)}%
+            </small>
+            <p>{g.instructions}</p>
+            <small>
+              {g.remember
+                ? 'Запоминает последнее уверенное значение'
+                : 'Оценивает текущее состояние'}
+            </small>
+            <div className="decision-toolbar">
+              <Button type="button" size="sm" variant="outline" onClick={() => setSelected(g.id)}>
+                Настроить
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                disabled={settings.groups.length >= 32}
+                aria-label={`Дублировать ${g.name}`}
+                onClick={() => {
+                  const copy = {
+                    ...structuredClone(g),
+                    id: ruleTemplate(g.type || 'choice').id,
+                    name: `${g.name.slice(0, 90)} · копия`,
+                  };
+                  change({ groups: [...settings.groups, copy] });
+                  setSelected(copy.id);
+                }}
+              >
+                <Copy size={14} />
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                aria-label={`Удалить ${g.name}`}
+                onClick={() => {
+                  change({ groups: settings.groups.filter((v) => v.id !== g.id) });
+                  if (selected === g.id) setSelected('__primary');
+                }}
+              >
+                <Trash2 size={14} />
+              </Button>
+            </div>
+          </article>
+        ))}
+      </div>
       <div className="decision-toolbar">
         {(['choice', 'noul', 'score'] as Kind[]).map((k) => (
           <Button
@@ -198,13 +276,61 @@ export function DecisionPlayground({
             type="button"
             size="sm"
             variant="outline"
-            disabled={settings.groups.length >= 8}
+            disabled={settings.groups.length >= 32}
             onClick={() => add(k)}
           >
             <Plus size={14} />
             {names[k]}
           </Button>
         ))}
+        <Button
+          type="button"
+          size="sm"
+          variant="secondary"
+          disabled={settings.groups.length > 26}
+          onClick={() => {
+            const use = { ...ruleTemplate('choice'), remember: true };
+            const price = ruleTemplate('noul');
+            const ready = ruleTemplate('score');
+            const urgency = {
+              ...ruleTemplate('score'),
+              name: 'Срочность',
+              instructions: 'Насколько срочно клиенту нужно решение?',
+              levels: [
+                'Срок не назван',
+                'Есть план на ближайшее время',
+                'Нужно сегодня',
+                'Требуется немедленно',
+              ],
+              scoreThreshold: 2,
+            };
+            const customer = {
+              ...ruleTemplate('choice'),
+              remember: true,
+              name: 'Тип обращения',
+              instructions: 'Связь нужна для личного использования или бизнеса?',
+              choices: [
+                { id: 'personal', name: 'Личное', description: 'Для себя или семьи' },
+                {
+                  id: 'business',
+                  name: 'Бизнес',
+                  description: 'Для компании, сотрудников или рабочих задач',
+                },
+              ],
+            };
+            const extra = {
+              ...ruleTemplate('noul'),
+              name: 'Есть дополнительная потребность',
+              instructions: 'Клиент явно назвал ещё одну потребность помимо основного обращения?',
+              trueWhen: 'Назван отдельный товар, услуга или задача',
+              falseWhen: 'Обсуждаются только подробности основного обращения',
+            };
+            change({ groups: [...settings.groups, use, price, ready, urgency, customer, extra] });
+            setSelected(use.id);
+          }}
+        >
+          Добавить набор для продаж · 6 классификаторов
+        </Button>
       </div>
       <div className="decision-grid">
         <div className="decision-input">
@@ -241,6 +367,14 @@ export function DecisionPlayground({
                   />
                   Использовать в разговоре
                 </label>
+                <label className="check-label">
+                  <input
+                    type="checkbox"
+                    checked={!!rule.remember}
+                    onChange={(e) => update({ remember: e.target.checked })}
+                  />
+                  Запоминать последнее уверенное значение
+                </label>
                 <Button
                   type="button"
                   variant="ghost"
@@ -248,7 +382,7 @@ export function DecisionPlayground({
                   aria-label="Удалить вопрос"
                   onClick={() => {
                     change({ groups: settings.groups.filter((_, i) => i !== index) });
-                    setSelected('intent');
+                    setSelected('__primary');
                   }}
                 >
                   <Trash2 size={15} />
@@ -507,11 +641,21 @@ export function DecisionPlayground({
           </label>
           <Button type="button" disabled={busy || !state.trim()} onClick={() => void test()}>
             <Play size={16} />
-            {busy ? 'Проверяем…' : 'Запустить решение'}
+            {busy
+              ? 'Проверяем набор…'
+              : `Проверить весь набор · ${settings.groups.filter((g) => g.enabled).length + 1}`}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            disabled={busy || !state.trim()}
+            onClick={() => void test(false)}
+          >
+            Проверить только открытый классификатор
           </Button>
           <p className="muted">
-            Один вопрос → один вызов Decision Model. Проверяются текущие поля, сохранять заранее не
-            нужно. Резервная LLM в этой проверке не вызывается.
+            Все включённые вопросы → один вызов Decision Model. Проверяются текущие поля, сохранять
+            заранее не нужно. Резервная LLM в этой проверке не вызывается.
           </p>
           {error && (
             <div role="alert" className="error-banner">
@@ -520,7 +664,7 @@ export function DecisionPlayground({
           )}
           {!result && !busy && (
             <div className="decision-empty">
-              Запустите решение, чтобы увидеть ответ и вероятности.
+              Проверьте набор, чтобы увидеть все результаты вместе.
             </div>
           )}
           {result?.demo && (
@@ -529,20 +673,37 @@ export function DecisionPlayground({
               рабочий режим с ключом.
             </div>
           )}
-          {result?.answer && (
+          {!!result?.results.length && (
+            <div className="classifier-summary" aria-live="polite">
+              <h3>Общий контекст · {result.results.length} результатов</h3>
+              <p className="muted">
+                {(result.latencyMs / 1000).toFixed(2)} с · один запрос. Все признаки доступны
+                ассистенту вместе.
+              </p>
+              {result.results.map((v) => (
+                <div key={v.id}>
+                  <strong>{v.name}</strong>
+                  <span>{v.label.label}</span>
+                  <small>{Math.round(v.label.confidence * 100)}%</small>
+                </div>
+              ))}
+            </div>
+          )}
+          {selectedResult?.answer && (
             <div className="decision-result" aria-live="polite">
-              <strong>{result.label?.label}</strong>
-              {result.answer.type === 'score' && (
+              <strong>{selectedResult.label?.label}</strong>
+              {selectedResult.answer.type === 'score' && (
                 <p>
-                  Оценка модели: {result.answer.score.toFixed(2)} / {(rule.levels?.length || 1) - 1}
+                  Оценка модели: {selectedResult.answer.score.toFixed(2)} /{' '}
+                  {(rule.levels?.length || 1) - 1}
                 </p>
               )}
               <p>
-                {(result.latencyMs / 1000).toFixed(2)} с · уверенность{' '}
+                {(selectedResult.latencyMs / 1000).toFixed(2)} с · уверенность{' '}
                 {Math.round(
-                  (result.answer.type === 'noul'
-                    ? Math.max(result.answer.noul, 1 - result.answer.noul)
-                    : result.answer.confidence) * 100,
+                  (selectedResult.answer.type === 'noul'
+                    ? Math.max(selectedResult.answer.noul, 1 - selectedResult.answer.noul)
+                    : selectedResult.answer.confidence) * 100,
                 )}
                 %
               </p>
@@ -584,7 +745,12 @@ export function DecisionPlayground({
                 result?.request || {
                   model: settings.model,
                   state: { instructions: settings.instructions, transcript: state },
-                  questions: { [rule.id]: question },
+                  questions: Object.fromEntries(
+                    [
+                      { ...intentRule, id: '_primary_intent' },
+                      ...settings.groups.filter((g) => g.enabled),
+                    ].map((g) => [g.id, decisionQuestion(g)]),
+                  ),
                 },
                 null,
                 2,

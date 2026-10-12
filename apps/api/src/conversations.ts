@@ -275,6 +275,9 @@ export async function assignSpeaker(
         ? { ...segment, role, excluded: role === 'bystander', confidence: 1 }
         : segment,
     );
+    next.card.labels = [];
+    next.card.facts = [];
+    next.card.classificationSource = null;
     return next;
   });
   if (c) {
@@ -318,6 +321,7 @@ export async function editSegment(
       );
     }
     n.card.facts = [];
+    n.card.labels = [];
     n.card.classificationSource = null;
     n.card.intent = 'unknown';
     n.card.needs = [];
@@ -459,6 +463,7 @@ async function classifyLatest(user: SessionUser, snapshot: Conversation, histori
       !historical &&
       c.autoHints &&
       (result.patch.shouldHint ||
+        classifierContextChanged(snapshot.card.labels, c.card.labels) ||
         findUrgent(c, docs) ||
         ((c.assistanceMode || config.defaultAssistanceMode) === 'scripts' && !c.salesScriptId))
     )
@@ -469,6 +474,17 @@ async function classifyLatest(user: SessionUser, snapshot: Conversation, histori
       classifiers.delete(snapshot.id);
     }
   }
+}
+function classifierContextChanged(
+  before: Conversation['card']['labels'],
+  after: Conversation['card']['labels'],
+) {
+  const values = (labels: Conversation['card']['labels']) =>
+    (labels || [])
+      .filter((v) => v.value !== 'unknown')
+      .map((v) => [v.key, v.value])
+      .sort((a, b) => a[0].localeCompare(b[0]));
+  return JSON.stringify(values(before)) !== JSON.stringify(values(after));
 }
 export async function configureConversation(
   user: SessionUser,

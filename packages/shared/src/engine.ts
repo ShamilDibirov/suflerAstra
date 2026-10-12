@@ -226,7 +226,7 @@ export function compactContext(
       direction: card.direction,
       intent: card.intent,
       intentLabel: card.intentLabel,
-      labels: card.labels || [],
+      labels: (card.labels || []).map(({ ruleSignature: _signature, ...label }) => label),
       secondaryIntents: card.secondaryIntents,
       stage: card.stage,
       needs: card.needs,
@@ -239,7 +239,7 @@ export function compactContext(
   };
   // Reserve room for the newest speech. Cutting a serialized string used to
   // drop precisely the new information and could produce malformed JSON.
-  const budget = Math.max(1200, limit);
+  const budget = Math.max(1200, limit, JSON.stringify(payload.card.labels).length + 2400);
   while (JSON.stringify(payload).length > budget && payload.recent.length > 6)
     payload.recent = payload.recent.slice(1);
   while (JSON.stringify(payload).length > budget && payload.card.facts.length > 4)
