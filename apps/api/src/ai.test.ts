@@ -9,6 +9,7 @@ import {
   inferSpeakerRoles,
   inferBoundary,
   assistantResponse,
+  playgroundDecision,
 } from './ai';
 import { newConversation } from '@sufler/shared/engine';
 import { demoDocuments } from '@sufler/shared/demo';
@@ -410,4 +411,97 @@ it('gives chat a richer answer contract and real message memory while automatic 
     'hint',
   );
   expect(vi.mocked(generateText).mock.calls.at(-1)![0].maxOutputTokens).toBe(450);
+});
+
+it('playground sends one real typed decision, masks PII and preserves provider distributions without fallback', async () => {
+  const settings = { ...DEFAULT_CLASSIFICATION, revision: 0, updatedAt: null };
+  const rule = {
+    id: 'readiness',
+    name: 'Готовность',
+    type: 'score' as const,
+    instructions: 'Готов купить?',
+    enabled: true,
+    choices: [],
+    levels: ['Смотрит', 'Выбирает', 'Покупает'],
+    scoreThreshold: 1,
+  };
+  const raw = {
+    request_id: 'req_test',
+    answers: {
+      readiness: {
+        type: 'score',
+        score: 1.4,
+        confidence: 0.95,
+        probabilities: { '0': 0.1, '1': 0.4, '2': 0.5 },
+        legend: { '0': 'Смотрит', '1': 'Выбирает', '2': 'Покупает' },
+      },
+    },
+    usage: { input_tokens: 30 },
+  };
+  fetchMock.mockResolvedValue(new Response(JSON.stringify(raw)));
+  const result = await playgroundDecision(settings, rule, 'Клиент: Мой номер +7 (999) 123-45-67');
+  expect(result.answer).toEqual(raw.answers.readiness);
+  expect(result.label?.value).toBe('1.4');
+  const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+  expect(Object.keys(body.questions)).toEqual(['readiness']);
+  expect(body.questions.readiness.criteria).toEqual(rule.levels);
+  expect(body.state.transcript).not.toContain('123-45-67');
+  expect(generateText).not.toHaveBeenCalled();
+  fetchMock.mockResolvedValue(new Response('{}', { status: 403 }));
+  await expect(playgroundDecision(settings, rule, 'Hello')).rejects.toThrow('HTTP 403');
+  expect(generateText).not.toHaveBeenCalled();
+});
+
+it('live classification stores binary and fractional rubric results from the same configured questions', async () => {
+  const settings = {
+    ...DEFAULT_CLASSIFICATION,
+    revision: 3,
+    updatedAt: null,
+    groups: [
+      {
+        id: 'price',
+        name: 'Цена',
+        type: 'noul' as const,
+        instructions: 'Есть возражение?',
+        trueWhen: 'Дорого',
+        falseWhen: 'Согласие',
+        enabled: true,
+        choices: [],
+      },
+      {
+        id: 'ready',
+        name: 'Готовность',
+        type: 'score' as const,
+        instructions: 'Готов купить?',
+        levels: ['Нет', 'Выбирает', 'Да'],
+        scoreThreshold: 1,
+        enabled: true,
+        choices: [],
+      },
+    ],
+  };
+  fetchMock.mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        ...response(),
+        answers: {
+          ...response().answers,
+          label_0: { type: 'noul', noul: 0.98 },
+          label_1: { type: 'score', score: 1.25, confidence: 0.96 },
+        },
+      }),
+    ),
+  );
+  const result = await classify(
+    card(),
+    demoDocuments('org'),
+    new AbortController().signal,
+    'decision',
+    undefined,
+    settings,
+  );
+  expect(result.patch.labels.map((v) => v.value)).toEqual(['true', '1.25']);
+  const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+  expect(body.questions.label_0.criteria).toEqual({ true: 'Дорого', false: 'Согласие' });
+  expect(body.questions.label_1.criteria).toEqual(['Нет', 'Выбирает', 'Да']);
 });

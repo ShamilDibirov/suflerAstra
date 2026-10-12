@@ -1,6 +1,18 @@
 {
-  "name": "@sufler/shared", "version": "0.1.0", "private": true, "type": "module",
-  "exports": {".": "./src/index.ts", "./demo": "./src/demo.ts", "./engine": "./src/engine.ts"},
-  "scripts": {"typecheck": "tsc --noEmit"},
-  "dependencies": {"zod": "^4.3.6"}
+  "name": "@sufler/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./demo": "./src/demo.ts",
+    "./engine": "./src/engine.ts",
+    "./decisions": "./src/decisions.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "^4.3.6"
+  }
 }

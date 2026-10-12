@@ -411,6 +411,12 @@ export const ClassificationInput = z
           name: z.string().trim().min(1).max(100),
           instructions: z.string().trim().min(1).max(800),
           enabled: z.boolean().default(true),
+          type: z.enum(['choice', 'noul', 'score']).optional(),
+          threshold: z.number().min(0.5).max(0.99).optional(),
+          trueWhen: z.string().trim().max(800).optional(),
+          falseWhen: z.string().trim().max(800).optional(),
+          levels: z.array(z.string().trim().min(1).max(400)).max(10).optional(),
+          scoreThreshold: z.number().min(0).max(9).optional(),
           choices: z
             .array(
               z.object({
@@ -419,8 +425,8 @@ export const ClassificationInput = z
                 description: z.string().trim().min(1).max(400),
               }),
             )
-            .min(2)
-            .max(12),
+            .max(12)
+            .default([]),
         }),
       )
       .max(8)
@@ -439,12 +445,23 @@ export const ClassificationInput = z
       v.groups.map((x) => x.id),
       ['groups'],
     );
-    v.groups.forEach((g, i) =>
+    v.groups.forEach((g, i) => {
       unique(
         g.choices.map((c) => c.id),
         ['groups', i, 'choices'],
-      ),
-    );
+      );
+      const issue = (field: string, message: string) =>
+        ctx.addIssue({ code: 'custom', path: ['groups', i, field], message });
+      if ((!g.type || g.type === 'choice') && g.choices.length < 2)
+        issue('choices', 'Добавьте минимум два варианта выбора');
+      if (g.type === 'noul' && (!g.trueWhen || !g.falseWhen))
+        issue('trueWhen', 'Опишите условия и для «Да», и для «Нет»');
+      if (g.type === 'score') {
+        if (!g.levels || g.levels.length < 2) issue('levels', 'Добавьте минимум два уровня');
+        if (g.scoreThreshold == null || g.scoreThreshold > (g.levels?.length || 0) - 1)
+          issue('scoreThreshold', 'Порог должен находиться внутри шкалы');
+      }
+    });
   });
 export type ClassificationSettings = z.infer<typeof ClassificationInput> & {
   revision: number;

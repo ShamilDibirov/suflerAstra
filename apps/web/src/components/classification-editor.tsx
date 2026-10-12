@@ -8,9 +8,9 @@ import {
 } from '@sufler/shared';
 import { api, post } from '@/lib/api';
 import { Button } from './ui/button';
+import { DecisionPlayground } from './decision-playground';
 
 type Intent = ClassificationSettings['intents'][number];
-type Group = ClassificationSettings['groups'][number];
 export function ClassificationEditor() {
   const [settings, setSettings] = useState<ClassificationSettings | null>(null);
   const [published, setPublished] = useState<Intent[]>([]),
@@ -45,9 +45,6 @@ export function ClassificationEditor() {
   const intent = (i: number, values: Partial<Intent>) =>
     settings &&
     change({ intents: settings.intents.map((v, at) => (at === i ? { ...v, ...values } : v)) });
-  const group = (i: number, values: Partial<Group>) =>
-    settings &&
-    change({ groups: settings.groups.map((v, at) => (at === i ? { ...v, ...values } : v)) });
   if (!settings)
     return (
       <section className="panel settings-panel">{error || 'Загружаем классификацию…'}</section>
@@ -73,8 +70,9 @@ export function ClassificationEditor() {
             .finally(() => setBusy(false));
         }}
       >
-        <section className="panel settings-panel">
-          <h2>Как понимать разговор</h2>
+        <DecisionPlayground settings={settings} published={published} change={change} />
+        <details className="panel settings-panel">
+          <summary>Модель и общие правила</summary>
           <p className="muted">
             Настройки вашей организации. Новые реплики используют сохранённую версию. При недостатке
             данных доступен вариант «Не определено».
@@ -122,11 +120,12 @@ export function ClassificationEditor() {
               />
             </label>
           </div>
-        </section>
-        <section className="panel settings-panel">
+        </details>
+        <details className="panel settings-panel">
+          <summary>Все намерения и направления</summary>
           <div className="settings-heading">
             <div>
-              <h2>Намерения клиента</h2>
+              <h2>Из чего выбирать намерение</h2>
               <p className="muted">
                 Имя показывается в карточке. Описание объясняет модели, когда выбирать намерение.
               </p>
@@ -234,177 +233,7 @@ export function ClassificationEditor() {
               </p>
             </details>
           )}
-        </section>
-        <section className="panel settings-panel">
-          <div className="settings-heading">
-            <div>
-              <h2>Дополнительные лейблы</h2>
-              <p className="muted">
-                Например, сценарий использования, срочность, готовность купить. Каждая группа задаёт
-                один вопрос и варианты выбора.
-              </p>
-            </div>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={settings.groups.length >= 8}
-              onClick={() =>
-                change({
-                  groups: [
-                    ...settings.groups,
-                    {
-                      id: `label_${Date.now()}`,
-                      name: '',
-                      instructions: '',
-                      enabled: true,
-                      choices: [
-                        { id: 'option_a', name: '', description: '' },
-                        { id: 'option_b', name: '', description: '' },
-                      ],
-                    },
-                  ],
-                })
-              }
-            >
-              <Plus size={16} />
-              Группа лейблов
-            </Button>
-          </div>
-          {!settings.groups.length && (
-            <p className="muted">
-              Добавьте группу: её результат появится в карточке и контексте ассистента.
-            </p>
-          )}
-          {settings.groups.map((g, i) => (
-            <div className="classification-rule" key={i}>
-              <div className="settings-heading">
-                <label className="check-label">
-                  <input
-                    type="checkbox"
-                    checked={g.enabled}
-                    onChange={(e) => group(i, { enabled: e.target.checked })}
-                  />
-                  Включено
-                </label>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  aria-label={`Удалить группу ${g.name || i + 1}`}
-                  onClick={() => change({ groups: settings.groups.filter((_, at) => at !== i) })}
-                >
-                  <Trash2 size={15} />
-                </Button>
-              </div>
-              <div className="form-grid">
-                <label>
-                  ID группы
-                  <input
-                    required
-                    pattern="[a-z][a-z0-9_]{0,59}"
-                    value={g.id}
-                    onChange={(e) => group(i, { id: e.target.value })}
-                  />
-                </label>
-                <label>
-                  Название группы
-                  <input
-                    required
-                    maxLength={100}
-                    value={g.name}
-                    onChange={(e) => group(i, { name: e.target.value })}
-                  />
-                </label>
-                <label className="full">
-                  Вопрос к Decision Model
-                  <textarea
-                    required
-                    rows={2}
-                    maxLength={800}
-                    value={g.instructions}
-                    onChange={(e) => group(i, { instructions: e.target.value })}
-                  />
-                </label>
-              </div>
-              {g.choices.map((v, j) => (
-                <div className="classification-choice" key={j}>
-                  <label>
-                    ID варианта
-                    <input
-                      required
-                      pattern="[a-z][a-z0-9_]{0,59}"
-                      value={v.id}
-                      onChange={(e) =>
-                        group(i, {
-                          choices: g.choices.map((x, at) =>
-                            at === j ? { ...x, id: e.target.value } : x,
-                          ),
-                        })
-                      }
-                    />
-                  </label>
-                  <label>
-                    Лейбл
-                    <input
-                      required
-                      maxLength={100}
-                      value={v.name}
-                      onChange={(e) =>
-                        group(i, {
-                          choices: g.choices.map((x, at) =>
-                            at === j ? { ...x, name: e.target.value } : x,
-                          ),
-                        })
-                      }
-                    />
-                  </label>
-                  <label>
-                    Значение для модели
-                    <input
-                      required
-                      maxLength={400}
-                      value={v.description}
-                      onChange={(e) =>
-                        group(i, {
-                          choices: g.choices.map((x, at) =>
-                            at === j ? { ...x, description: e.target.value } : x,
-                          ),
-                        })
-                      }
-                    />
-                  </label>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    disabled={g.choices.length <= 2}
-                    aria-label={`Удалить лейбл ${v.name || j + 1}`}
-                    onClick={() => group(i, { choices: g.choices.filter((_, at) => at !== j) })}
-                  >
-                    <Trash2 size={15} />
-                  </Button>
-                </div>
-              ))}
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={g.choices.length >= 12}
-                onClick={() =>
-                  group(i, {
-                    choices: [
-                      ...g.choices,
-                      { id: `option_${g.choices.length + 1}`, name: '', description: '' },
-                    ],
-                  })
-                }
-              >
-                <Plus size={14} />
-                Вариант
-              </Button>
-            </div>
-          ))}
-        </section>
+        </details>
         <div className="settings-save">
           <Button type="submit" disabled={busy}>
             <Save size={16} />
@@ -425,7 +254,7 @@ export function ClassificationEditor() {
         </div>
       </form>
       <section className="panel settings-panel">
-        <h2>Проверить на разговоре</h2>
+        <h2>Проверить всю карточку</h2>
         <p className="muted">
           Можно проверить настройки до сохранения. В рабочем режиме тест вызывает Decision Model и
           LLM по тарифу вашего провайдера.

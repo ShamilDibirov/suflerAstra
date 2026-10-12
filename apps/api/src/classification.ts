@@ -11,16 +11,21 @@ import { store } from './store';
 import { config } from './config';
 
 export async function getClassification(orgId: string): Promise<ClassificationSettings> {
-  return (
-    (await store.get<ClassificationSettings>(orgId, 'settings', 'classification')) || {
-      ...structuredClone(DEFAULT_CLASSIFICATION),
-      model: config.classifier,
-      fallbackModel: config.fallback,
-      threshold: config.decisionThreshold,
-      revision: 0,
-      updatedAt: null,
-    }
-  );
+  const saved = await store.get<ClassificationSettings>(orgId, 'settings', 'classification');
+  if (saved)
+    return {
+      ...ClassificationInput.parse(saved),
+      revision: saved.revision,
+      updatedAt: saved.updatedAt,
+    };
+  return {
+    ...structuredClone(DEFAULT_CLASSIFICATION),
+    model: config.classifier,
+    fallbackModel: config.fallback,
+    threshold: config.decisionThreshold,
+    revision: 0,
+    updatedAt: null,
+  };
 }
 export async function saveClassification(user: SessionUser, input: unknown) {
   assertAdmin(user);

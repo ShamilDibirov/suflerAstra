@@ -332,6 +332,27 @@ try {
     ).status,
     201,
   );
+  assert.equal(
+    (
+      await call('/api/admin/classification/playground', {
+        cookie: staff,
+        method: 'POST',
+        body: {},
+      })
+    ).status,
+    403,
+  );
+  const foreignRuleTest = await call('/api/admin/classification/playground', {
+    cookie: other,
+    method: 'POST',
+    body: {
+      settings: (await call('/api/admin/classification', { cookie: other })).body.settings,
+      transcript: 'Test',
+      target: 'rule',
+      ruleId: 'org_owner_rule',
+    },
+  });
+  assert.equal(foreignRuleTest.status, 400);
   assert((await call('/api/intents', { cookie: staff })).body.some((v) => v.id === 'retention'));
   assert(!(await call('/api/intents', { cookie: other })).body.some((v) => v.id === 'retention'));
   const customCard = await call(`/api/conversations/${a.id}`, {

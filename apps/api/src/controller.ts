@@ -45,7 +45,7 @@ import { config } from './config';
 import { getPrompts, savePrompts } from './prompts';
 import { getClassification, saveClassification, classificationIntents } from './classification';
 import { chatAnswer } from './assistant';
-import { classify } from './ai';
+import { classify, playgroundDecision } from './ai';
 import {
   ClassificationInput,
   SegmentSchema as TestSegmentSchema,
@@ -295,6 +295,47 @@ export class ApiController {
       latencyMs: Date.now() - start,
       demo: config.demo,
     };
+  }
+
+  @Post('admin/classification/playground') async decisionPlayground(
+    @Req() req: Request,
+    @Body() body: unknown,
+  ) {
+    const user = await session(req);
+    assertAdmin(user);
+    const input = z
+      .object({
+        transcript: z.string().trim().min(1).max(8000),
+        settings: ClassificationInput,
+        target: z.enum(['intent', 'rule']),
+        ruleId: z.string().optional(),
+      })
+      .parse(body);
+    const saved = await getClassification(user.orgId);
+    const settings = { ...input.settings, revision: saved.revision, updatedAt: saved.updatedAt };
+    let rule = settings.groups.find((g) => g.id === input.ruleId);
+    if (input.target === 'intent') {
+      const docs = (await store.list<KnowledgeDocument>(user.orgId, 'document')).filter((d) =>
+        isPublished(d, user.orgId),
+      );
+      const c = newConversation(user.orgId, user.id, settings.fallbackModel, 'Проверка');
+      const intents = classificationIntents(c, docs, settings);
+      rule = {
+        id: 'intent',
+        name: 'Намерение клиента',
+        type: 'choice',
+        enabled: true,
+        instructions:
+          'Определи основное ещё не решённое намерение клиента из перечисленных вариантов.',
+        choices: Object.entries(intents).map(([id, v]) => ({
+          id,
+          name: v.name,
+          description: v.description,
+        })),
+      };
+    }
+    if (!rule) throw new BadRequestException('Выберите существующий вопрос');
+    return playgroundDecision(settings, rule, input.transcript);
   }
 
   @Get('admin/prompts') async prompts(@Req() req: Request) {
