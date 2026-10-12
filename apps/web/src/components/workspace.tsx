@@ -80,6 +80,7 @@ export function Workspace() {
     [cardIntent, setCardIntent] = useState(''),
     [cardLabel, setCardLabel] = useState(''),
     [cardRegion, setCardRegion] = useState('Все регионы');
+  const audioError = useRef<string | null>(null);
   const conversationRef = useRef(conversation);
   conversationRef.current = conversation;
   const notify = useCallback((message: string) => {
@@ -95,6 +96,14 @@ export function Workspace() {
           c.id === current?.id ||
           ((!current || current.status !== 'active') && c.status === 'active')
         ) {
+          setBoundary((current) =>
+            current &&
+            c.segments.some(
+              (s) => s.speakerId === current.speakerId && !s.excluded && s.role !== 'unknown',
+            )
+              ? null
+              : current,
+          );
           conversationRef.current = c;
           setConversation((prev) =>
             !prev || prev.id !== c.id || c.card.revision >= prev.card.revision ? c : prev,
@@ -111,11 +120,17 @@ export function Workspace() {
       if (event.type === 'context.status' && event.conversationId === conversationRef.current?.id)
         setContextStatus((event.data as { message: string }).message);
       if (event.type === 'error') {
+        audioError.current = event.scope === 'audio' ? String(event.data) : null;
         setError(String(event.data));
-        setPartial('');
+        if (event.scope === 'audio') setPartial('');
       }
       if (event.type === 'audio.status') {
         const data = event.data as { message?: string; status: string };
+        if (['listening', 'enrolled'].includes(data.status) && audioError.current) {
+          const previous = audioError.current;
+          setError((current) => (current === previous ? '' : current));
+          audioError.current = null;
+        }
         if (data.message) notify(data.message);
         if (['stopped', 'enrolled'].includes(data.status)) setPartial('');
       }
@@ -275,7 +290,9 @@ export function Workspace() {
       !conversation?.card.completedSteps.includes(b.id),
   );
   const card = conversation?.card;
-  const live = ['listening', 'enrolling', 'connecting', 'finishing'].includes(audio.status);
+  const live = ['listening', 'enrolling', 'connecting', 'reconnecting', 'finishing'].includes(
+    audio.status,
+  );
   const Hint = (
     <HintCard
       hint={currentHint}
@@ -398,7 +415,7 @@ export function Workspace() {
                         ? 'Знакомимся с вашим голосом…'
                         : audio.status === 'listening'
                           ? 'Суфлёр слушает разговор'
-                          : audio.status === 'connecting'
+                          : ['connecting', 'reconnecting'].includes(audio.status)
                             ? 'Подключаем микрофон…'
                             : 'Микрофон выключен'}
                 </strong>
@@ -458,6 +475,7 @@ export function Workspace() {
             </div>
             {settings && (
               <div className="audio-settings">
+                {audio.provider && <p className="muted">Речь: {audio.provider}</p>}
                 <select
                   value={audio.deviceId}
                   onChange={(e) => audio.setDeviceId(e.target.value)}
@@ -476,8 +494,33 @@ export function Workspace() {
                   disabled={live || user.demo}
                   onClick={() => void audio.start(true)}
                 >
-                  {audio.enrolled ? 'Перезаписать голос' : 'Записать мой голос · 25 с'}
+                  {audio.enrolled ? 'Перезаписать сохранённый голос' : 'Записать мой голос · 25 с'}
                 </Button>
+                {audio.enrolled && (
+                  <div>
+                    <p className="muted">
+                      Ваш образец сохранён на сервере и используется после перезапуска.
+                    </p>
+                    <audio
+                      controls
+                      preload="none"
+                      src="/api/voice-profile/sample"
+                      style={{ width: '100%', marginTop: 8 }}
+                    />
+                    <Button
+                      variant="ghost"
+                      disabled={live || audio.draining}
+                      onClick={() =>
+                        void run(async () => {
+                          await api('/voice-profile', { method: 'DELETE' });
+                          audio.setEnrolled(false);
+                        })
+                      }
+                    >
+                      Удалить мой образец
+                    </Button>
+                  </div>
+                )}
               </div>
             )}
           </section>

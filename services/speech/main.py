@@ -1,19 +1,25 @@
 """Private streaming diarization gateway. No transcript from an unassigned voice enters RAG.
 
 Model weights are loaded at startup; no keyword heuristic replaces diarization if loading fails.
-One API instance maintains session profiles in RAM, expiring after 12 hours.
+Employee profiles and enrollment samples persist on a private mounted directory.
 """
 import asyncio
 import contextlib
 import hmac
 import os
-import time
+import logging
+import base64
+import io
+import wave
 import uuid
 from contextlib import asynccontextmanager
 
 import numpy as np
 import torch
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Header, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Header, HTTPException, Body
+from fastapi.responses import Response
+from profile_store import ProfileStore
+from deepgram_stream import listen as deepgram_listen
 from pyannote.core import SlidingWindow, SlidingWindowFeature
 from diart import SpeakerDiarization, SpeakerDiarizationConfig
 from diart.models import SegmentationModel, EmbeddingModel
@@ -23,7 +29,9 @@ from mistralai.client.models import AudioFormat
 
 SR = 16000
 TOKEN = os.environ.get("INTERNAL_SERVICE_TOKEN", "")
-profiles: dict[str, tuple[np.ndarray, float]] = {}
+PROVIDER = os.getenv("SPEECH_PROVIDER", "deepgram")
+profile_store = None
+logger = logging.getLogger("speech")
 models = {}
 inference_lock = asyncio.Lock()
 capacity = asyncio.Semaphore(int(os.getenv("SPEECH_MAX_SESSIONS", "10")))
@@ -42,24 +50,31 @@ def load_models():
     device = resolve_device()
     torch.set_num_threads(int(os.getenv("TORCH_THREADS", "2")))
     token = os.getenv("HF_TOKEN")
-    segmentation = SegmentationModel.from_pretrained("pyannote/segmentation-3.0", use_hf_token=token)
+    segmentation = SegmentationModel.from_pretrained("pyannote/segmentation-3.0", use_hf_token=token) if PROVIDER == "mistral" else None
     embedding = EmbeddingModel.from_pretrained("pyannote/wespeaker-voxceleb-resnet34-LM", use_hf_token=token)
-    segmentation.load()
+    if segmentation is not None:
+        segmentation.load()
     embedding.load()
-    segmentation.to(device).eval()
+    if segmentation is not None:
+        segmentation.to(device).eval()
     embedding.to(device).eval()
     return {"segmentation": segmentation, "embedding": embedding, "vad": load_silero_vad(), "device": device}
 
 
 @asynccontextmanager
 async def lifespan(app):
+    global profile_store
     if len(TOKEN) < 32:
         raise RuntimeError("INTERNAL_SERVICE_TOKEN must have at least 32 characters")
-    if not os.getenv("MISTRAL_API_KEY"):
-        raise RuntimeError("MISTRAL_API_KEY is required")
+    if PROVIDER not in ("deepgram", "mistral"):
+        raise RuntimeError("SPEECH_PROVIDER must be deepgram or mistral")
+    required = "DEEPGRAM_API_KEY" if PROVIDER == "deepgram" else "MISTRAL_API_KEY"
+    if not os.getenv(required):
+        raise RuntimeError(f"{required} is required")
+    profile_store = ProfileStore(os.getenv("SPEECH_PROFILE_DIR", "/models/voice-profiles"))
     models.update(await asyncio.to_thread(load_models))
     yield
-    profiles.clear()
+
 
 
 app = FastAPI(lifespan=lifespan)
@@ -69,8 +84,38 @@ app = FastAPI(lifespan=lifespan)
 def health(x_internal_token: str = Header(default="")):
     if not TOKEN or not hmac.compare_digest(x_internal_token, TOKEN):
         raise HTTPException(401)
-    return {"ok": bool(models), "diarization": "diart", "asr": "voxtral-realtime", "device": str(models.get("device", "unloaded"))}
+    return {"ok": bool(models), "diarization": "deepgram" if PROVIDER == "deepgram" else "diart", "asr": os.getenv("DEEPGRAM_MODEL", "nova-3") if PROVIDER == "deepgram" else "voxtral-realtime", "device": str(models.get("device", "unloaded"))}
 
+
+def authorize_profile(token):
+    if not TOKEN or not hmac.compare_digest(token, TOKEN):
+        raise HTTPException(401)
+    if profile_store is None:
+        raise HTTPException(503)
+
+@app.post("/profile/status")
+def profile_status(body: dict = Body(...), x_internal_token: str = Header(default="")):
+    authorize_profile(x_internal_token)
+    value = profile_store.load(str(body.get("profileId", "")))
+    return {"available": value is not None, "savedAt": value["savedAt"] if value else None, "provider": PROVIDER, "model": os.getenv("DEEPGRAM_MODEL", "nova-3") if PROVIDER == "deepgram" else "voxtral-realtime"}
+
+@app.post("/profile/delete")
+def profile_delete(body: dict = Body(...), x_internal_token: str = Header(default="")):
+    authorize_profile(x_internal_token)
+    profile_store.delete(str(body.get("profileId", "")))
+    return {"ok": True}
+
+@app.post("/profile/sample")
+def profile_sample(body: dict = Body(...), x_internal_token: str = Header(default="")):
+    authorize_profile(x_internal_token)
+    value = profile_store.load(str(body.get("profileId", "")))
+    if value is None:
+        raise HTTPException(404)
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(SR)
+        wav.writeframes(base64.b64decode(value["pcm"]))
+    return Response(buffer.getvalue(), media_type="audio/wav", headers={"Cache-Control": "no-store"})
 
 def vector(audio: np.ndarray):
     with torch.inference_mode():
@@ -121,9 +166,6 @@ async def stream(ws: WebSocket):
             profile_id = str(init.get("profileId", ""))[:200]
             if init.get("type") != "start" or not profile_id:
                 raise ValueError("Неверная аудиосессия")
-            for key, (_, expiry) in list(profiles.items()):
-                if expiry < time.time():
-                    profiles.pop(key, None)
             if init.get("mode") == "enroll":
                 await ws.send_json({"type": "ready"})
                 parts, size = [], 0
@@ -142,12 +184,19 @@ async def stream(ws: WebSocket):
                     raise ValueError("Нужно не менее 8 секунд чистой речи. Запишите образец ещё раз.")
                 vectors = [await embed(clean[i:i + 3 * SR]) for i in range(0, len(clean) - 3 * SR + 1, 3 * SR)]
                 value = np.mean(vectors, axis=0)
-                profiles[profile_id] = (value / np.linalg.norm(value), time.time() + 12 * 3600)
+                profile_store.save(profile_id, (value / np.linalg.norm(value)).tolist(), (np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes())
                 await ws.send_json({"type": "enrolled"})
                 return
-            if profile_id not in profiles:
+            saved = profile_store.load(profile_id)
+            if saved is None:
                 raise ValueError("Сначала запишите образец голоса консультанта в настройках микрофона")
-            staff = profiles[profile_id][0]
+            staff = np.asarray(saved["vector"], dtype=np.float32)
+            if PROVIDER == "deepgram":
+                async def identify(pcm, reference):
+                    samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768
+                    return float(np.dot(reference, await embed(samples)))
+                await deepgram_listen(ws, staff, identify)
+                return
             pipeline = SpeakerDiarization(SpeakerDiarizationConfig(
                 segmentation=models["segmentation"], embedding=models["embedding"],
                 duration=5, step=.5, latency=2, sample_rate=SR, max_speakers=8,
@@ -311,9 +360,11 @@ async def stream(ws: WebSocket):
         except WebSocketDisconnect:
             pass
         except Exception as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None) or getattr(exc, "status_code", None)
+            logger.error("Speech failed provider=%s exception=%s status=%s", PROVIDER, type(exc).__name__, status)
             with contextlib.suppress(Exception):
                 # Never echo provider payloads or secrets to the browser.
-                await ws.send_json({"type": "error", "message": str(exc) if isinstance(exc, ValueError) else "Ошибка сервиса речи. Проверьте модели, ключ Mistral и соединение."})
+                await ws.send_json({"type": "error", "recoverable": isinstance(exc, (TimeoutError, OSError)) or type(exc).__name__.startswith("ConnectionClosed") or status in (408, 429, 500, 502, 503, 504), "message": str(exc) if isinstance(exc, ValueError) else f"Сервис речи {PROVIDER}: {type(exc).__name__}" + (f" · HTTP {status}" if status else "") + ". Проверьте соединение и runtime logs speech."})
         finally:
             if consumer:
                 consumer.cancel()

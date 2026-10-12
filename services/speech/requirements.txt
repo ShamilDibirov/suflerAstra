@@ -12,3 +12,5 @@ huggingface-hub<1
 torchvision==0.20.1+cpu
 # pyannote.core 5 uses matplotlib.cm.get_cmap, removed in newer Matplotlib.
 matplotlib==3.8.4
+
+websockets==17.2

@@ -1,16 +1,25 @@
 'use client';
 import { useRef, useState, useEffect } from 'react';
 import { encodeAudioFrame, type AppEvent } from '@sufler/shared';
-import { socketUrl } from '@/lib/api';
+import { isAudioFailure, shouldRetrySpeech } from '@/lib/audio-events';
+import { api, socketUrl } from '@/lib/api';
 export function useAudio(conversationId: string | undefined, onEvent: (event: AppEvent) => void) {
   const [status, setStatus] = useState('stopped'),
     [devices, setDevices] = useState<MediaDeviceInfo[]>([]),
     [deviceId, setDeviceId] = useState(''),
     [level, setLevel] = useState(0),
     [enrolled, setEnrolled] = useState(false),
+    [provider, setProvider] = useState(''),
     [draining, setDraining] = useState(false);
   const paused = useRef(false);
+  const enrolling = useRef(false);
   const captureEpoch = useRef(0);
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const attempts = useRef(0);
+  const resumeRef = useRef<() => void>(() => {});
+  resumeRef.current = () => {
+    void start(false, true);
+  };
   const socket = useRef<WebSocket | null>(null),
     stream = useRef<MediaStream | null>(null),
     context = useRef<AudioContext | null>(null),
@@ -29,17 +38,34 @@ export function useAudio(conversationId: string | undefined, onEvent: (event: Ap
     captureEpoch.current++;
     setDraining(false);
     setStatus('stopped');
-    if (!conversationId) return;
+    setEnrolled(false);
+    setProvider('');
+    let current = true;
+    void api<{ available: boolean; provider?: string; model?: string }>('/voice-profile')
+      .then((profile) => {
+        if (!current) return;
+        setEnrolled(profile.available);
+        setProvider([profile.provider, profile.model].filter(Boolean).join(' · '));
+      })
+      .catch(() => {});
+    if (!conversationId)
+      return () => {
+        current = false;
+      };
     const ws = new WebSocket(socketUrl(conversationId));
     socket.current = ws;
     ws.onmessage = (e) => {
+      if (socket.current !== ws) return;
       const event = JSON.parse(e.data) as AppEvent;
       if (event.type === 'audio.status') {
         const s = event.data as { status: string };
         setStatus(
-          paused.current && ['listening', 'enrolling', 'finishing', 'stopped'].includes(s.status)
-            ? 'paused'
-            : s.status,
+          retryTimer.current
+            ? 'reconnecting'
+            : paused.current &&
+                ['listening', 'enrolling', 'finishing', 'stopped'].includes(s.status)
+              ? 'paused'
+              : s.status,
         );
         if (s.status === 'stopped') setDraining(false);
         if (s.status === 'enrolled') {
@@ -48,28 +74,45 @@ export function useAudio(conversationId: string | undefined, onEvent: (event: Ap
         }
         if (['stopped', 'demo', 'finishing'].includes(s.status)) cleanup();
       }
-      if (event.type === 'error') {
+      if (isAudioFailure(event)) {
         setDraining(false);
         cleanup();
         setStatus('stopped');
+        if (shouldRetrySpeech(event, attempts.current, paused.current || enrolling.current)) {
+          attempts.current++;
+          setStatus('reconnecting');
+          retryTimer.current = setTimeout(() => {
+            retryTimer.current = null;
+            if (!paused.current) resumeRef.current();
+          }, 1500 * attempts.current);
+        }
       }
       eventRef.current(event);
     };
     ws.onerror = () => {
+      if (socket.current !== ws) return;
       setDraining(false);
       setStatus('stopped');
       cleanup();
       eventRef.current({
         type: 'error',
+        scope: 'audio',
         data: 'Связь с аудиосервисом прервана. Повторно включите микрофон.',
       });
     };
     ws.onclose = () => {
+      if (socket.current !== ws) return;
+      if (retryTimer.current) clearTimeout(retryTimer.current);
+      retryTimer.current = null;
       setDraining(false);
       cleanup();
       setStatus('stopped');
     };
     return () => {
+      current = false;
+      captureEpoch.current++;
+      if (retryTimer.current) clearTimeout(retryTimer.current);
+      retryTimer.current = null;
       cleanup();
       ws.close();
       socket.current = null;
@@ -79,18 +122,21 @@ export function useAudio(conversationId: string | undefined, onEvent: (event: Ap
     const list = await navigator.mediaDevices.enumerateDevices();
     setDevices(list.filter((d) => d.kind === 'audioinput'));
   }
-  async function start(enroll = false) {
+  async function start(enroll = false, retry = false) {
     if (!socket.current || socket.current.readyState !== WebSocket.OPEN) {
       eventRef.current({
         type: 'error',
+        scope: 'audio',
         data: 'Аудиоканал ещё подключается. Повторите через секунду.',
       });
       return;
     }
     try {
       if (draining) return;
+      if (!retry) attempts.current = 0;
       const epoch = ++captureEpoch.current;
       paused.current = false;
+      enrolling.current = enroll;
       setStatus('connecting');
       const capture = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -166,11 +212,14 @@ export function useAudio(conversationId: string | undefined, onEvent: (event: Ap
       setStatus('stopped');
       eventRef.current({
         type: 'error',
+        scope: 'audio',
         data: e instanceof Error ? e.message : 'Нет доступа к микрофону',
       });
     }
   }
   function stop() {
+    if (retryTimer.current) clearTimeout(retryTimer.current);
+    retryTimer.current = null;
     captureEpoch.current++;
     paused.current = true;
     setDraining(['connecting', 'listening', 'enrolling'].includes(status));
@@ -189,6 +238,8 @@ export function useAudio(conversationId: string | undefined, onEvent: (event: Ap
     setDeviceId,
     level,
     enrolled,
+    provider,
+    setEnrolled,
     draining,
     start,
     stop,

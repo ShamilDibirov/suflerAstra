@@ -301,3 +301,24 @@ describe('speaker assignment', () => {
     expect(saved.segments).toHaveLength(2);
   });
 });
+
+it('recovers earlier unknown transcript when the enrolled employee is recognized later', async () => {
+  const c = await createConversation(user);
+  const unknown = {
+    ...segment('Здравствуйте'),
+    role: 'unknown' as const,
+    speakerId: 'stream:7',
+    excluded: true,
+  };
+  await addSegment(user, c.id, unknown);
+  await addSegment(user, c.id, {
+    ...segment('Чем могу помочь?'),
+    role: 'consultant',
+    speakerId: 'stream:7',
+  });
+  const updated = await requireConversation(user, c.id);
+  expect(updated.segments.find((s) => s.id === unknown.id)).toMatchObject({
+    role: 'consultant',
+    excluded: false,
+  });
+});

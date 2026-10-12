@@ -68,6 +68,32 @@ export class ApiController {
       throw new BadRequestException(providerError(error));
     }
   }
+  private async voiceRequest(req: Request, action: 'status' | 'delete' | 'sample') {
+    const user = await session(req);
+    if (config.demo) return null;
+    const response = await fetch(`${config.speech}/profile/${action}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Internal-Token': config.internalToken },
+      body: JSON.stringify({ profileId: `${user.orgId}:${user.id}` }),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!response.ok)
+      throw new BadRequestException('Сохранённый профиль голоса недоступен. Проверьте speech.');
+    return response;
+  }
+  @Get('voice-profile') async voiceProfile(@Req() req: Request) {
+    return (await this.voiceRequest(req, 'status'))?.json() || { available: false };
+  }
+  @Delete('voice-profile') async removeVoiceProfile(@Req() req: Request) {
+    return (await this.voiceRequest(req, 'delete'))?.json() || { ok: true };
+  }
+  @Get('voice-profile/sample') async voiceSample(@Req() req: Request, @Res() res: Response) {
+    const response = await this.voiceRequest(req, 'sample');
+    if (!response) throw new NotFoundException();
+    res.setHeader('Content-Type', 'audio/wav');
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.send(Buffer.from(await response.arrayBuffer()));
+  }
   @Get('health') health() {
     return { ok: true, service: 'sufler-api' };
   }

@@ -76,6 +76,11 @@ services:
     build: {context: ., dockerfile: services/speech/Dockerfile.cuda}
     environment:
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN}
+      SPEECH_PROVIDER: ${SPEECH_PROVIDER:-deepgram}
+      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY:-}
+      DEEPGRAM_MODEL: ${DEEPGRAM_MODEL:-nova-3}
+      DEEPGRAM_LANGUAGE: ${DEEPGRAM_LANGUAGE:-ru}
+      SPEECH_PROFILE_DIR: /models/voice-profiles
       MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
       HF_TOKEN: ${HF_TOKEN:-}
       STAFF_SIMILARITY_THRESHOLD: ${STAFF_SIMILARITY_THRESHOLD:-0.65}

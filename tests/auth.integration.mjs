@@ -1,5 +1,6 @@
 // Exercises the compiled API and real Better Auth against an isolated, disposable PostgreSQL.
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import { spawn, execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
@@ -17,6 +18,28 @@ const docker = (...args) =>
   execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 let server,
   log = '';
+const voiceProfiles = new Set();
+const speechMock = createServer(async (req, res) => {
+  if (req.headers['x-internal-token'] !== secret) {
+    res.writeHead(401).end();
+    return;
+  }
+  let raw = '';
+  for await (const chunk of req) raw += chunk;
+  const { profileId } = JSON.parse(raw);
+  if (req.url === '/profile/sample') {
+    if (!voiceProfiles.has(profileId)) {
+      res.writeHead(404).end();
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'audio/wav' }).end(Buffer.from('RIFFsample'));
+    return;
+  }
+  if (req.url === '/profile/delete') voiceProfiles.delete(profileId);
+  res
+    .writeHead(200, { 'Content-Type': 'application/json' })
+    .end(JSON.stringify({ available: voiceProfiles.has(profileId), ok: true }));
+});
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 async function ready(url) {
   for (let i = 0; i < 60; i++) {
@@ -28,6 +51,7 @@ async function ready(url) {
   throw new Error(`Server did not start: ${log}`);
 }
 try {
+  await new Promise((resolve) => speechMock.listen(0, '127.0.0.1', resolve));
   docker(
     'run',
     '-d',
@@ -64,6 +88,7 @@ try {
     RAG_ENABLED: 'false',
     ASSISTANCE_MODE: 'scripts',
     KNOWLEDGE_URL: 'http://127.0.0.1:1',
+    SPEECH_URL: `http://127.0.0.1:${speechMock.address().port}`,
     NODE_ENV: 'test',
     DATABASE_URL: `postgresql://sufler:${secret}@127.0.0.1:${mapped}/sufler`,
     REDIS_URL: '',
@@ -137,6 +162,24 @@ try {
   );
   const staff = await login(email);
   assert.equal((await call('/api/session', { cookie: staff })).body.role, 'consultant');
+  const ownerInfo = (await call('/api/session', { cookie: owner })).body;
+  voiceProfiles.add(`${ownerInfo.orgId}:${ownerInfo.id}`);
+  assert.equal((await call('/api/voice-profile')).status, 401);
+  assert.equal((await call('/api/voice-profile', { cookie: owner })).body.available, true);
+  assert.equal((await call('/api/voice-profile', { cookie: staff })).body.available, false);
+  const ownSample = await fetch(origin + '/api/voice-profile/sample', {
+    headers: { Cookie: owner },
+  });
+  assert.equal(ownSample.status, 200);
+  assert.equal(await ownSample.text(), 'RIFFsample');
+  const foreignSample = await fetch(
+    origin + `/api/voice-profile/sample?profileId=${ownerInfo.orgId}:${ownerInfo.id}`,
+    { headers: { Cookie: staff } },
+  );
+  assert.notEqual(foreignSample.status, 200);
+  await call('/api/voice-profile', { cookie: owner, method: 'DELETE' });
+  assert.equal((await call('/api/voice-profile', { cookie: owner })).body.available, false);
+
   for (const path of [
     '/api/admin/users',
     '/api/admin/documents',
@@ -375,6 +418,7 @@ try {
   process.exitCode = 1;
 } finally {
   server?.kill('SIGTERM');
+  await new Promise((resolve) => speechMock.close(resolve));
   try {
     docker('rm', '-f', name);
   } catch {}

@@ -127,7 +127,15 @@ export async function addSegment(user: SessionUser, id: string, segment: Transcr
   const c = await store.mutateConversation(user.orgId, id, (v) => {
     if (v.status !== 'active' || v.segments.some((s) => s.id === segment.id)) return null;
     const next = meaningful ? invalidate(v) : v;
-    next.segments = [...v.segments, { ...segment, text: maskPII(segment.text) }].slice(-1000);
+    const prior =
+      meaningful && segment.speakerId !== 'manual'
+        ? v.segments.map((s) =>
+            s.speakerId === segment.speakerId && s.role === 'unknown'
+              ? { ...s, role: segment.role, excluded: false }
+              : s,
+          )
+        : v.segments;
+    next.segments = [...prior, { ...segment, text: maskPII(segment.text) }].slice(-1000);
     next.error = null;
     return next;
   });
@@ -587,6 +595,7 @@ async function makeCoachingHint(
         messages: question ? c.messages.slice(-6) : [],
         model: c.modelId,
         promptRevision: prompts.revision,
+        instructions: question ? prompts.chatPrompt : prompts.hintPrompt,
         question,
         recentHints: c.hints.slice(-3).map((h) => h.text),
       }),

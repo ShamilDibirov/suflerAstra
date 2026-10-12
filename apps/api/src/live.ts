@@ -87,7 +87,13 @@ export function setupLive(server: Server) {
               }));
               if (!saved) await deleteFile(key);
             })
-            .catch(() => send({ type: 'error', data: 'Не удалось сохранить часть аудиозаписи' }));
+            .catch(() =>
+              send({
+                type: 'error',
+                scope: 'storage',
+                data: 'Не удалось сохранить часть аудиозаписи',
+              }),
+            );
         };
         const stopAudio = (graceful = false) => {
           audioEpoch++;
@@ -264,7 +270,12 @@ export function setupLive(server: Server) {
                   return;
                 }
                 if (event.type === 'error') {
-                  send({ type: 'error', data: event.message });
+                  send({
+                    type: 'error',
+                    scope: 'audio',
+                    recoverable: event.recoverable === true,
+                    data: event.message,
+                  });
                   stopAudio();
                   return;
                 }
@@ -325,13 +336,19 @@ export function setupLive(server: Server) {
                   });
                 }
               } catch {
-                send({ type: 'error', data: 'Не удалось обработать результат распознавания' });
+                send({
+                  type: 'error',
+                  scope: 'assistant',
+                  data: 'Не удалось сохранить расшифровку. Аудиоканал продолжает работать.',
+                });
               }
             });
             speech.on('error', () => {
               if (speech !== channel) return;
               send({
                 type: 'error',
+                scope: 'audio',
+                recoverable: true,
                 data: 'Сервис речи недоступен. Проверьте подключение и состояние моделей.',
               });
               stopAudio();
@@ -344,7 +361,11 @@ export function setupLive(server: Server) {
               send({ type: 'audio.status', data: { status: 'stopped' } });
             });
           } catch (e) {
-            send({ type: 'error', data: e instanceof Error ? e.message : 'Ошибка аудиопотока' });
+            send({
+              type: 'error',
+              scope: 'audio',
+              data: e instanceof Error ? e.message : 'Ошибка аудиопотока',
+            });
             stopAudio();
           }
         });
