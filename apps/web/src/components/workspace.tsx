@@ -60,8 +60,15 @@ export function Workspace() {
   const [conversation, setConversation] = useState<Conversation | null>(null),
     [models, setModels] = useState<ModelConfig[]>([]),
     [docs, setDocs] = useState<KnowledgeDocument[]>([]),
-    [runtime, setRuntime] = useState({ ragEnabled: true, defaultAssistanceMode: 'rag' }),
+    [runtime, setRuntime] = useState({
+      ragEnabled: true,
+      defaultAssistanceMode: 'rag',
+      recordAudio: false,
+      retentionDays: 7,
+    }),
     [busy, setBusy] = useState(false),
+    [loading, setLoading] = useState(true),
+    [zen, setZen] = useState(true),
     [error, setError] = useState(''),
     [toast, setToast] = useState('');
   const [text, setText] = useState(''),
@@ -144,16 +151,22 @@ export function Workspace() {
       api<Conversation[]>('/conversations'),
       api<ModelConfig[]>('/models'),
       api<KnowledgeDocument[]>('/knowledge'),
-      api<{ ragEnabled: boolean; defaultAssistanceMode: string }>('/config'),
+      api<{
+        ragEnabled: boolean;
+        defaultAssistanceMode: string;
+        recordAudio: boolean;
+        retentionDays: number;
+      }>('/config'),
     ])
       .then(async ([history, list, knowledge, settings]) => {
         setRuntime(settings);
         setModels(list);
         setDocs(knowledge);
         const active = history.find((c) => c.status === 'active');
-        setConversation(active || (await post<Conversation>('/conversations')));
+        setConversation(active || null);
       })
-      .catch((e) => setError(e.message));
+      .catch((e) => setError(e.message))
+      .finally(() => setLoading(false));
   }, [user]);
   useEffect(() => {
     if (!conversation?.id) return;
@@ -188,11 +201,14 @@ export function Workspace() {
     }
   }
   async function newClient() {
-    audio.stop();
+    await audio.stopAndWait();
     setPartial('');
     setBoundary(null);
     setContextStatus('');
-    const created = await post<Conversation>('/conversations', { modelId: conversation?.modelId });
+    const created = await post<Conversation>('/conversations', {
+      modelId: conversation?.modelId,
+      previousId: conversation?.status === 'active' ? conversation.id : undefined,
+    });
     const mode = conversation?.assistanceMode;
     setConversation(
       mode && (mode === 'scripts' || runtime.ragEnabled)
@@ -281,6 +297,20 @@ export function Workspace() {
       notify(e instanceof Error ? e.message : 'Не удалось открыть виджет');
     }
   }
+  async function endSession() {
+    await audio.stopAndWait();
+    if (conversation) await post(`/conversations/${conversation.id}/finish`);
+    pip?.close();
+    setPip(null);
+    setConversation(null);
+    conversationRef.current = null;
+    setPartial('');
+    setBoundary(null);
+    setContextStatus('');
+    setChat(false);
+    setText('');
+    setSettings(false);
+  }
   const currentHint = conversation?.hints.filter((h) => h.status === 'current').at(-1);
   const currentDoc = docs.find((d) => d.id === currentHint?.blocks[0]?.documentId);
   const upcoming = currentDoc?.blocks.find(
@@ -295,15 +325,22 @@ export function Workspace() {
   );
   const Hint = (
     <HintCard
+      coaching={
+        (conversation?.assistanceMode || runtime.defaultAssistanceMode) === 'scripts' &&
+        !conversation?.salesScriptId
+      }
       hint={currentHint}
       emptyMessage={
         conversation?.error ||
         ((conversation?.assistanceMode || runtime.defaultAssistanceMode) === 'scripts' &&
         !conversation?.salesScriptId
-          ? 'База знаний не нужна: начните разговор или нажмите «Подскажи». Модель предложит следующий вопрос по промпту продаж.'
+          ? conversation?.autoHints
+            ? 'Начните разговор. Подсказки по продажам будут появляться автоматически.'
+            : 'Начните разговор и нажмите «Подскажи», когда понадобится совет.'
           : undefined)
       }
       busy={busy}
+      auto={conversation?.autoHints}
       onHint={() => void hint()}
       onChat={() => {
         setChat(true);
@@ -317,9 +354,31 @@ export function Workspace() {
     />
   );
   if (!user) return <LoadingScreen error={sessionError} />;
+  if (loading) return <LoadingScreen />;
+  if (!conversation || conversation.status === 'completed')
+    return (
+      <Shell user={user}>
+        <section className="panel session-start">
+          <AudioLines size={32} />
+          <h1>Начните новую сессию</h1>
+          <p className="muted">
+            Прошлые диалоги и записи доступны в истории. Новая сессия начнётся с чистого контекста.
+          </p>
+          {error && (
+            <p role="alert" className="error-banner">
+              {error}
+            </p>
+          )}
+          <Button disabled={busy} onClick={() => void run(newClient)}>
+            Начать сессию
+          </Button>
+        </section>
+      </Shell>
+    );
+
   return (
     <Shell user={user}>
-      <div className="page-heading">
+      <div className="page-heading workspace-heading">
         <div>
           <h1>Диалог с клиентом</h1>
           <p>Сосредоточьтесь на разговоре. Подсказки — на нас.</p>
@@ -350,6 +409,12 @@ export function Workspace() {
               ))}
             </select>
           </div>
+          <Button variant="outline" onClick={() => setZen(!zen)}>
+            {zen ? 'Все панели' : 'Фокус'}
+          </Button>
+          <Button variant="outline" disabled={busy} onClick={() => void run(endSession)}>
+            Завершить сессию
+          </Button>
           <Button className="pip-trigger" variant="outline" onClick={() => void openPip()}>
             <PanelTop size={15} />
             Поверх окон
@@ -360,7 +425,7 @@ export function Workspace() {
           </Button>
         </div>
       </div>
-      {(conversation?.assistanceMode || runtime.defaultAssistanceMode) === 'scripts' && (
+      {!zen && (conversation?.assistanceMode || runtime.defaultAssistanceMode) === 'scripts' && (
         <div className="info-banner" style={{ marginBottom: 16 }}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
             Режим продаж
@@ -398,7 +463,7 @@ export function Workspace() {
           </button>
         </div>
       )}
-      <div className="work-grid">
+      <div className={`work-grid ${zen ? 'zen-mode' : ''}`}>
         <div className="work-main">
           <section className="panel">
             <div className="audio-strip">
@@ -421,7 +486,9 @@ export function Workspace() {
                 </strong>
                 <small>
                   {live
-                    ? 'Запись активна · текст и аудио сохраняются 30 дней'
+                    ? runtime.recordAudio
+                      ? `Аудио сохраняется · ${runtime.retentionDays} дней`
+                      : 'Аудиозапись отключена на сервере'
                     : user.demo
                       ? 'Учебный диалог · звук не записывается'
                       : 'Выберите микрофон и начните консультацию'}
@@ -488,15 +555,19 @@ export function Workspace() {
                     </option>
                   ))}
                 </select>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={live || user.demo}
-                  onClick={() => void audio.start(true)}
-                >
-                  {audio.enrolled ? 'Перезаписать сохранённый голос' : 'Записать мой голос · 25 с'}
-                </Button>
-                {audio.enrolled && (
+                {audio.enrollmentRequired && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={live || user.demo}
+                    onClick={() => void audio.start(true)}
+                  >
+                    {audio.enrolled
+                      ? 'Перезаписать сохранённый голос'
+                      : 'Записать мой голос · 25 с'}
+                  </Button>
+                )}
+                {audio.enrollmentRequired && audio.enrolled && (
                   <div>
                     <p className="muted">
                       Ваш образец сохранён на сервере и используется после перезапуска.
@@ -525,7 +596,7 @@ export function Workspace() {
             )}
           </section>
           {Hint}
-          <section className="panel next-step">
+          <section className="panel next-step secondary-panel">
             <span className="next-step-icon">
               <CheckCheck size={17} />
             </span>
@@ -547,7 +618,7 @@ export function Workspace() {
               Шаг выполнен
             </Button>
           </section>
-          <section className="panel">
+          <section className="panel transcript-panel">
             <div className="panel-header transcript-header">
               <h3>
                 <AudioLines size={16} />
@@ -662,7 +733,11 @@ export function Workspace() {
                   </span>
                   <div className="speech-content">
                     <div className="speech-meta">
-                      <strong>{roleLabels[s.role]}</strong>
+                      <strong>
+                        {s.role === 'unknown' && s.roleInference
+                          ? `Спикер ${Number(s.speakerId.split(':').at(-1)) + 1} · определяем роль`
+                          : roleLabels[s.role]}
+                      </strong>
                       <time>{formatTime(s.createdAt)}</time>
                       {s.excluded && <span className="tag gray">Вне контекста</span>}
                     </div>

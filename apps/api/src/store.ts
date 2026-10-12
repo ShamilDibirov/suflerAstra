@@ -37,14 +37,14 @@ export class Store {
       for (const [key, row] of this.memory)
         if (
           key.startsWith(`${org}:`) &&
-          ['revision', 'usage'].includes(key.split(':')[1]) &&
+          ['revision', 'usage', 'model-call'].includes(key.split(':')[1]) &&
           (row.data as { conversationId?: string }).conversationId === id
         )
           this.memory.delete(key);
       return;
     }
     await pool!.query(
-      "DELETE FROM app_record WHERE org_id=$1 AND kind IN ('revision','usage') AND data->>'conversationId'=$2",
+      "DELETE FROM app_record WHERE org_id=$1 AND kind IN ('revision','usage','model-call') AND data->>'conversationId'=$2",
       [org, id],
     );
   }

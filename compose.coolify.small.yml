@@ -2,7 +2,7 @@
 x-api-env: &api-env
   DEMO_MODE: 'false'
   RETENTION_DAYS: ${RETENTION_DAYS:-7}
-  AUDIO_RECORDING_ENABLED: ${AUDIO_RECORDING_ENABLED:-false}
+  AUDIO_RECORDING_ENABLED: ${AUDIO_RECORDING_ENABLED:-true}
   APP_ORIGIN: ${APP_ORIGIN:?Set HTTPS APP_ORIGIN}
   DATABASE_URL: postgresql://sufler:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/sufler
   REDIS_URL: redis://redis:6379
@@ -89,24 +89,17 @@ services:
     depends_on: [weaviate]
     restart: unless-stopped
   speech:
-    mem_limit: 1536m
+    mem_limit: 256m
     platform: linux/amd64
-    build: {context: ., dockerfile: services/speech/Dockerfile}
+    build: {context: ., dockerfile: services/speech/Dockerfile.deepgram}
     environment:
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN}
       SPEECH_PROVIDER: ${SPEECH_PROVIDER:-deepgram}
       DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY:-}
       DEEPGRAM_MODEL: ${DEEPGRAM_MODEL:-nova-3}
       DEEPGRAM_LANGUAGE: ${DEEPGRAM_LANGUAGE:-ru}
-      SPEECH_PROFILE_DIR: /models/voice-profiles
-      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
-      HF_TOKEN: ${HF_TOKEN:-}
-      STAFF_SIMILARITY_THRESHOLD: ${STAFF_SIMILARITY_THRESHOLD:-0.65}
       SPEECH_MAX_SESSIONS: ${SPEECH_MAX_SESSIONS:-1}
-      SPEECH_DEVICE: cpu
-      TORCH_THREADS: ${TORCH_THREADS:-2}
     command: ['uvicorn', 'main:app', '--host', '0.0.0.0', '--port', '8001', '--no-access-log']
-    volumes: [speech-models:/models]
     restart: unless-stopped
   migrate:
     restart: "no"

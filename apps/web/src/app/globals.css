@@ -2065,3 +2065,104 @@ kbd {
     flex-wrap: wrap;
   }
 }
+
+/* Focus mode keeps the current hint and microphone controls in view. */
+.zen-mode {
+  grid-template-columns: minmax(0, 1fr);
+  max-width: 960px;
+  margin-inline: auto;
+}
+.zen-mode > aside,
+.zen-mode .secondary-panel {
+  display: none;
+}
+.zen-mode .transcript-list {
+  max-height: 180px;
+}
+.zen-mode .audio-strip {
+  padding: 12px 16px;
+}
+.zen-mode .audio-copy small,
+.zen-mode .wave {
+  display: none;
+}
+.audio-settings {
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 12px 16px;
+}
+.session-start {
+  max-width: 620px;
+  margin: 10vh auto;
+  padding: 32px;
+  display: grid;
+  gap: 20px;
+}
+.call-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 12px;
+  margin-block: 16px;
+}
+.call-stats > div {
+  padding: 12px;
+  background: #f7f5fb;
+  border-radius: 12px;
+}
+.call-stats strong {
+  display: block;
+  font-size: 20px;
+}
+.call-log {
+  border: 1px solid #e7e3f0;
+  border-radius: 12px;
+  padding: 12px;
+  margin-block: 8px;
+}
+.call-log summary {
+  cursor: pointer;
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+.call-log pre {
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: 12px;
+  padding: 12px;
+}
+.recording-player {
+  padding: 16px;
+  border: 1px solid #e7e3f0;
+  border-radius: 12px;
+  display: grid;
+  gap: 10px;
+}
+.recording-player audio,
+.recording-player select {
+  width: 100%;
+}
+
+.workspace-heading {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 16px;
+}
+.workspace-heading .heading-actions {
+  display: flex;
+  flex-wrap: wrap;
+  max-width: 100%;
+  justify-content: flex-start;
+}
+.workspace-heading .heading-actions > * {
+  min-width: 0;
+}
+@media (max-width: 640px) {
+  .workspace-heading .heading-actions > .model-select {
+    flex: 1 1 160px;
+  }
+  .zen-mode .audio-strip {
+    flex-wrap: wrap;
+  }
+}

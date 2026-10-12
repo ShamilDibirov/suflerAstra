@@ -1,6 +1,13 @@
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { generateText } from 'ai';
-import { classify, selectEvidence, salesAdvice, validateCoaching, testDecisionModel } from './ai';
+import {
+  classify,
+  selectEvidence,
+  salesAdvice,
+  validateCoaching,
+  testDecisionModel,
+  inferSpeakerRoles,
+} from './ai';
 import { newConversation } from '@sufler/shared/engine';
 import { demoDocuments } from '@sufler/shared/demo';
 import { MODEL_DEFAULTS, PatchSchema, SegmentSchema } from '@sufler/shared';
@@ -186,4 +193,35 @@ it('checks the standalone Decision Model endpoint with bearer authentication', a
   expect(url).toContain('/compatible-mode/v1/systemone');
   expect(request.headers.Authorization).toBe('Bearer test-key');
   expect(JSON.parse(request.body).model).toBe('decision-model-preview');
+});
+
+it('infers semantic roles only for supplied speakers and accepts no low-confidence guess', async () => {
+  const c = card();
+  c.segments = [
+    { ...c.segments[0], speakerId: 'stream:7', role: 'unknown', roleInference: true },
+    {
+      ...c.segments[0],
+      id: 'second',
+      speakerId: 'stream:2',
+      role: 'unknown',
+      roleInference: true,
+      text: 'Как могу помочь?',
+    },
+  ];
+  fetchMock.mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        answers: {
+          speaker_0: { type: 'choice', choice: 'customer', confidence: 0.96 },
+          speaker_1: { type: 'choice', choice: 'consultant', confidence: 0.5 },
+          speaker_99: { type: 'choice', choice: 'consultant', confidence: 0.99 },
+        },
+      }),
+    ),
+  );
+  const roles = await inferSpeakerRoles(c, new AbortController().signal);
+  expect(roles).toEqual({ 'stream:7': { role: 'customer', confidence: 0.96, source: 'model' } });
+  const request = JSON.parse(fetchMock.mock.calls[0][1].body);
+  expect(request.questions.speaker_0.instructions).toContain('Номер спикера');
+  expect(JSON.stringify(request)).not.toContain('123-45-67');
 });

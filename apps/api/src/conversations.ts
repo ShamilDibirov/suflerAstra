@@ -22,12 +22,14 @@ import {
 } from '@sufler/shared/engine';
 import { store } from './store';
 import { emit } from './events';
-import { classify, selectEvidence, providerError, salesAdvice } from './ai';
+import { classify, selectEvidence, providerError, salesAdvice, inferSpeakerRoles } from './ai';
 import { retrieve, scriptSources } from './knowledge';
 import { redis } from './infra';
 import { config } from './config';
 import { getPrompts } from './prompts';
 
+const autoTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const roleJobs = new Map<string, AbortController>();
 const classifiers = new Map<string, AbortController>(),
   generators = new Map<string, AbortController>();
 export async function models(org: string) {
@@ -74,13 +76,17 @@ function update(c: Conversation) {
   emit(c.orgId, c.userId, { type: 'conversation.updated', conversationId: c.id, data: c });
 }
 export function cancel(id: string) {
+  clearTimeout(autoTimers.get(id));
+  autoTimers.delete(id);
   classifiers.get(id)?.abort();
   generators.get(id)?.abort();
   classifiers.delete(id);
   generators.delete(id);
 }
-export async function createConversation(user: SessionUser, modelId?: string) {
+export async function createConversation(user: SessionUser, modelId?: string, previousId?: string) {
   return store.withLock('active-conversation-capacity', async () => {
+    const previous = previousId ? await requireConversation(user, previousId, true) : null;
+    if (previous && previous.status !== 'active') throw new BadRequestException('Сессия завершена');
     const registry = await models(user.orgId);
     const selected = modelId
       ? registry.find((m) => m.id === modelId && m.enabled)
@@ -101,6 +107,7 @@ export async function createConversation(user: SessionUser, modelId?: string) {
       selected.id,
       `Клиент №${String(history.length + 1).padStart(2, '0')}`,
     );
+    c.sessionId = previous?.sessionId || previous?.id || c.id;
     c.assistanceMode = config.defaultAssistanceMode;
     await store.put(user.orgId, 'conversation', c.id, c);
     update(c);
@@ -110,6 +117,7 @@ export async function createConversation(user: SessionUser, modelId?: string) {
 export async function finish(user: SessionUser, id: string) {
   await requireConversation(user, id, true);
   cancel(id);
+  roleJobs.get(id)?.abort();
   const c = await store.mutateConversation(user.orgId, id, (v) => ({
     ...invalidate(v),
     status: 'completed',
@@ -121,16 +129,30 @@ export async function finish(user: SessionUser, id: string) {
 export async function addSegment(user: SessionUser, id: string, segment: TranscriptSegment) {
   const current = await requireConversation(user, id, true);
   if (current.status !== 'active') throw new BadRequestException('Разговор завершён');
-  const meaningful =
+  const known = current.speakerRoles?.[segment.speakerId];
+  if (known && !segment.ambiguous)
+    segment = { ...segment, role: known.role, excluded: known.role === 'bystander' };
+  let meaningful =
     eligibleSegments([segment]).length > 0 &&
     !/^(м[мх]+|э[эм]+)[.!?\s]*$/i.test(segment.text.trim());
   const c = await store.mutateConversation(user.orgId, id, (v) => {
     if (v.status !== 'active' || v.segments.some((s) => s.id === segment.id)) return null;
+    const assigned = v.speakerRoles?.[segment.speakerId];
+    if (assigned && !segment.ambiguous)
+      segment = {
+        ...segment,
+        role: assigned.role,
+        excluded: ['unknown', 'bystander'].includes(assigned.role),
+      };
+    meaningful =
+      eligibleSegments([segment]).length > 0 &&
+      !/^(м[мх]+|э[эм]+)[.!?\s]*$/i.test(segment.text.trim());
+
     const next = meaningful ? invalidate(v) : v;
     const prior =
       meaningful && segment.speakerId !== 'manual'
         ? v.segments.map((s) =>
-            s.speakerId === segment.speakerId && s.role === 'unknown'
+            s.speakerId === segment.speakerId && s.role === 'unknown' && !s.ambiguous
               ? { ...s, role: segment.role, excluded: false }
               : s,
           )
@@ -142,8 +164,51 @@ export async function addSegment(user: SessionUser, id: string, segment: Transcr
   if (!c) return current;
   if (meaningful) cancel(id);
   update(c);
+  if (segment.roleInference && segment.role === 'unknown' && !segment.ambiguous)
+    void resolveRoles(user, id).catch((e) => recordError(user, id, e));
   if (meaningful) void classifyLatest(user, c).catch((e) => recordError(user, id, e));
   return c;
+}
+async function resolveRoles(user: SessionUser, id: string) {
+  if (roleJobs.has(id)) return;
+  const controller = new AbortController();
+  roleJobs.set(id, controller);
+  try {
+    let observed = '';
+    while (!controller.signal.aborted) {
+      const snapshot = await requireConversation(user, id, true);
+      const latestId = snapshot.segments.at(-1)?.id || '';
+      if (snapshot.status !== 'active' || latestId === observed) break;
+      observed = latestId;
+      const roles = await inferSpeakerRoles(snapshot, controller.signal);
+      if (controller.signal.aborted) break;
+      const c = await store.mutateConversation(user.orgId, id, (v) => {
+        if (v.status !== 'active') return null;
+        const accepted = Object.fromEntries(
+          Object.entries(roles).filter(
+            ([speaker]) => v.speakerRoles?.[speaker]?.source !== 'manual',
+          ),
+        );
+        if (!Object.keys(accepted).length) return null;
+        const next = invalidate(v);
+        next.speakerRoles = { ...v.speakerRoles, ...accepted };
+        next.segments = next.segments.map((s) => {
+          const match = accepted[s.speakerId];
+          return match && s.roleInference && !s.ambiguous
+            ? { ...s, role: match.role, excluded: match.role === 'bystander' }
+            : s;
+        });
+        return next;
+      });
+      if (c) {
+        cancel(id);
+        update(c);
+        void classifyLatest(user, c).catch((e) => recordError(user, id, e));
+      }
+    }
+  } finally {
+    if (roleJobs.get(id) === controller) roleJobs.delete(id);
+  }
 }
 export async function assignSpeaker(
   user: SessionUser,
@@ -156,8 +221,12 @@ export async function assignSpeaker(
   const c = await store.mutateConversation(user.orgId, id, (v) => {
     if (v.status !== 'active') return null;
     const next = invalidate(v);
+    next.speakerRoles = {
+      ...v.speakerRoles,
+      [speakerId]: { role, source: 'manual', confidence: 1 },
+    };
     next.segments = next.segments.map((segment) =>
-      segment.speakerId === speakerId && segment.role === 'unknown'
+      segment.speakerId === speakerId && !segment.ambiguous
         ? { ...segment, role, excluded: role === 'bystander', confidence: 1 }
         : segment,
     );
@@ -186,6 +255,23 @@ export async function editSegment(
         ? { ...s, ...patch, text: maskPII(patch.text ?? s.text), confidence: 1 }
         : s,
     );
+    const edited = v.segments.find((s) => s.id === segmentId)!;
+    if (patch.role && edited.speakerId !== 'manual') {
+      n.speakerRoles = {
+        ...v.speakerRoles,
+        [edited.speakerId]: { role: patch.role, source: 'manual', confidence: 1 },
+      };
+      n.segments = n.segments.map((s) =>
+        s.speakerId === edited.speakerId && !s.ambiguous
+          ? {
+              ...s,
+              role: patch.role!,
+              excluded: ['unknown', 'bystander'].includes(patch.role!),
+              roleInference: false,
+            }
+          : s,
+      );
+    }
     n.card.facts = [];
     n.card.classificationSource = null;
     n.card.intent = 'unknown';
@@ -409,7 +495,19 @@ export async function makeHint(
           : await store.list<KnowledgeDocument>(user.orgId, 'document'),
       )
     : undefined;
-  if (!manual && !urgent && Date.now() - c.lastAutoHintAt < 8000) return null;
+  if (!manual && !c.autoHints) return null;
+  const remaining = 8000 - (Date.now() - c.lastAutoHintAt);
+  if (!manual && !urgent && remaining > 0) {
+    clearTimeout(autoTimers.get(id));
+    autoTimers.set(
+      id,
+      setTimeout(() => {
+        autoTimers.delete(id);
+        void makeHint(user, id, '', false).catch(() => {});
+      }, remaining + 10),
+    );
+    return null;
+  }
   generators.get(id)?.abort();
   const controller = new AbortController();
   generators.set(id, controller);
@@ -447,6 +545,7 @@ export async function makeHint(
     const hash = createHash('sha256')
       .update(
         JSON.stringify({
+          policy: 'fast-no-ui-actions-v2',
           org: user.orgId,
           context: compactContext(c.card, c.segments),
           model: c.modelId,
@@ -591,6 +690,7 @@ async function makeCoachingHint(
   const hash = createHash('sha256')
     .update(
       JSON.stringify({
+        policy: 'fast-no-ui-actions-v2',
         context: compactContext(c.card, c.segments),
         messages: question ? c.messages.slice(-6) : [],
         model: c.modelId,

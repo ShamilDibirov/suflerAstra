@@ -60,6 +60,7 @@ export function setupLive(server: Server) {
         let audioEpoch = 0;
         const promptedSpeakers = new Set<string>();
         let writeChain = Promise.resolve();
+        const pendingSegments = new Set<Promise<unknown>>();
         const send = (event: AppEvent) => {
           if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(event));
         };
@@ -289,6 +290,8 @@ export function setupLive(server: Server) {
                       endMs: z.number().nonnegative(),
                       confidence: z.number().min(0).max(1),
                       newSpeaker: z.boolean().optional(),
+                      roleInference: z.boolean().optional(),
+                      ambiguous: z.boolean().optional(),
                       gapMs: z.number().optional(),
                     })
                     .parse(event);
@@ -327,13 +330,19 @@ export function setupLive(server: Server) {
                       send({ type: 'session.boundary', conversationId, data: parsed });
                     }
                   }
-                  await addSegment(user, targetId, {
+                  const saving = addSegment(user, targetId, {
                     ...parsed,
                     id: randomUUID(),
                     final: true,
                     excluded: !['customer', 'consultant'].includes(parsed.role),
                     createdAt: new Date().toISOString(),
                   });
+                  pendingSegments.add(saving);
+                  try {
+                    await saving;
+                  } finally {
+                    pendingSegments.delete(saving);
+                  }
                 }
               } catch {
                 send({
@@ -358,7 +367,9 @@ export function setupLive(server: Server) {
               speech = null;
               draining = false;
               flush();
-              send({ type: 'audio.status', data: { status: 'stopped' } });
+              void Promise.allSettled([writeChain, ...pendingSegments]).then(() =>
+                send({ type: 'audio.status', data: { status: 'stopped' } }),
+              );
             });
           } catch (e) {
             send({

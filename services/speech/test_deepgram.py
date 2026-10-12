@@ -15,7 +15,7 @@ with patch.dict(sys.modules, {'websockets': types.ModuleType('websockets'), 'web
     spec.loader.exec_module(gateway)
 
 class DeepgramTest(unittest.IsolatedAsyncioTestCase):
-    async def test_continuous_stream_has_interim_speaker_profile_and_graceful_stop(self):
+    async def test_continuous_stream_without_enrollment_has_interim_and_graceful_stop(self):
         await self.run_stream(.95)
 
     async def test_unrecognized_voice_is_not_assumed_to_be_a_customer(self):
@@ -60,12 +60,14 @@ class DeepgramTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(audio), 64000)
             return score
         with patch.object(gateway, 'connect', connect), patch.dict('os.environ', {'DEEPGRAM_API_KEY': 'test-key'}):
-            await asyncio.wait_for(gateway.listen(Socket(), [1.0], identify), timeout=1)
+            await asyncio.wait_for(gateway.listen(Socket()), timeout=1)
         self.assertIn('diarize=true', connection[0][0])
         self.assertIn('language=ru', connection[0][0])
         self.assertEqual(connection[0][1]['additional_headers']['Authorization'], 'Token test-key')
         self.assertTrue(any(e['type'] == 'partial' and e['text'] for e in events))
-        self.assertEqual(next(e for e in events if e['type'] == 'segment')['role'], 'consultant' if score >= .65 else 'unknown')
+        self.assertEqual(next(e for e in events if e['type'] == 'segment')['role'], 'unknown')
+        self.assertTrue(next(e for e in events if e['type'] == 'segment')['roleInference'])
+        self.assertFalse(next(e for e in events if e['type'] == 'segment')['newSpeaker'])
         self.assertEqual(sum(e['type'] == 'segment' for e in events), 1)
         self.assertEqual(sum(isinstance(v, bytes) for v in sends), 10)
         self.assertEqual(json.loads(sends[-1])['type'], 'CloseStream')

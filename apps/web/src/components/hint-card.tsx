@@ -12,6 +12,8 @@ import type { Hint } from '@sufler/shared';
 import { Button } from './ui/button';
 export function HintCard({
   hint,
+  auto = false,
+  coaching = false,
   busy,
   onHint,
   onChat,
@@ -20,6 +22,8 @@ export function HintCard({
   emptyMessage,
 }: {
   emptyMessage?: string;
+  auto?: boolean;
+  coaching?: boolean;
   hint: Hint | undefined;
   busy: boolean;
   onHint: () => void;
@@ -37,7 +41,7 @@ export function HintCard({
           <span className="green-dot" />
           {busy
             ? 'Обновляем…'
-            : hint?.kind === 'coaching'
+            : hint?.kind === 'coaching' || (!hint && coaching)
               ? 'По промпту продаж'
               : 'На основе вашей базы'}
         </span>
@@ -73,10 +77,12 @@ export function HintCard({
       )}
       <div className="hint-footer">
         <div style={{ display: 'flex', gap: 8 }}>
-          <Button onClick={onHint} disabled={busy} size="sm">
-            <Sparkles size={14} />
-            {busy ? 'Думаем…' : 'Подскажи'}
-          </Button>
+          {!auto && (
+            <Button onClick={onHint} disabled={busy} size="sm">
+              <Sparkles size={14} />
+              {busy ? 'Думаем…' : 'Подскажи'}
+            </Button>
+          )}
           <Button onClick={onChat} variant="outline" size="sm">
             <MessageSquare size={14} />
             Открыть чат
@@ -84,7 +90,7 @@ export function HintCard({
         </div>
         <span className="hint-footer-meta">
           <ShieldCheck size={12} />
-          {hint?.kind === 'coaching'
+          {hint?.kind === 'coaching' || (!hint && coaching)
             ? 'Рекомендация по общению · без базы'
             : 'Только подтверждённые знания'}
         </span>

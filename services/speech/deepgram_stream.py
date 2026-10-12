@@ -23,7 +23,7 @@ def groups(words):
     return result
 
 
-async def listen(ws, staff, identify):
+async def listen(ws):
     key = os.environ.get('DEEPGRAM_API_KEY', '')
     if not key:
         raise ValueError('Добавьте DEEPGRAM_API_KEY и пересоздайте speech.')
@@ -31,9 +31,7 @@ async def listen(ws, staff, identify):
                        'encoding': 'linear16', 'sample_rate': '16000', 'channels': '1', 'diarize': 'true',
                        'interim_results': 'true', 'endpointing': '300', 'punctuate': 'true', 'smart_format': 'true'})
     namespace = uuid.uuid4().hex[:12]
-    roles, voice_samples, seen = {}, {}, set()
-    pcm = bytearray()
-    base = 0
+    roles, seen = {}, set()
     finished = False
     async with connect('wss://api.deepgram.com/v1/listen?' + query,
                        additional_headers={'Authorization': 'Token ' + key},
@@ -61,22 +59,11 @@ async def listen(ws, staff, identify):
                 role = 'unknown' if ambiguous else roles.get(speaker, 'unknown')
                 if role == 'bystander':
                     continue
-                start, end = int(group['start'] * 32000), int(group['end'] * 32000)
-                if role == 'unknown' and not ambiguous and not speaker.startswith('unassigned') and start >= base and end <= base + len(pcm):
-                    samples = voice_samples.setdefault(speaker, bytearray())
-                    samples.extend(pcm[start - base:end - base])
-                    # Identify the employee from a persisted enrollment, never from speaker 0 alone.
-                    if len(samples) >= 32000 * 2:
-                        similarity = await identify(bytes(samples[-32000 * 4:]), staff)
-                        samples.clear()
-                        if similarity >= float(os.getenv('STAFF_SIMILARITY_THRESHOLD', '0.65')):
-                            role = 'consultant'
-                            roles[speaker] = role
                 confidence = min(float(w.get('confidence', 0)) for w in group['words'])
                 await ws.send_json({'type': 'segment', 'text': text, 'role': role,
                                     'speakerId': f'{namespace}:{speaker}', 'startMs': round(group['start'] * 1000),
                                     'endMs': round(group['end'] * 1000), 'confidence': confidence,
-                                    'newSpeaker': role == 'unknown' and not ambiguous})
+                                    'newSpeaker': False, 'roleInference': not ambiguous and not speaker.startswith('unassigned'), 'ambiguous': ambiguous})
 
         async def receive():
             pending = []
@@ -149,11 +136,6 @@ async def listen(ws, staff, identify):
                 binary = packet.get('bytes', b'')
                 if not binary or len(binary) > 6400 or len(binary) % 2:
                     raise ValueError('Неверный PCM-фрагмент')
-                pcm.extend(binary)
-                if len(pcm) > 32000 * 90:
-                    removed = len(pcm) - 32000 * 90
-                    del pcm[:removed]
-                    base += removed
                 await upstream.send(binary)
         finally:
             finished = True

@@ -27,7 +27,9 @@ import {
   type Conversation,
   type KnowledgeDocument,
   type ModelConfig,
+  type ModelCallLog,
 } from '@sufler/shared';
+import { audioRange } from './audio-range';
 import { config } from './config';
 import { getPrompts, savePrompts } from './prompts';
 import { DEFAULT_PROMPTS } from '@sufler/shared';
@@ -100,6 +102,8 @@ export class ApiController {
   @Get('config') publicConfig() {
     return {
       demo: config.demo,
+      recordAudio: config.recordAudio,
+      retentionDays: config.retentionDays,
       ragEnabled: config.ragEnabled,
       defaultAssistanceMode: config.defaultAssistanceMode,
     };
@@ -118,8 +122,10 @@ export class ApiController {
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
   @Post('conversations') async create(@Req() req: Request, @Body() body: unknown) {
-    const data = z.object({ modelId: z.string().optional() }).parse(body || {});
-    return createConversation(await session(req), data.modelId);
+    const data = z
+      .object({ modelId: z.string().optional(), previousId: z.string().optional() })
+      .parse(body || {});
+    return createConversation(await session(req), data.modelId, data.previousId);
   }
   @Get('conversations/:id') async get(@Req() req: Request, @Param('id') id: string) {
     return requireConversation(await session(req), id);
@@ -425,6 +431,23 @@ export class ApiController {
       b.createdAt.localeCompare(a.createdAt),
     );
   }
+  @Get('admin/history/:id/analytics') async analytics(
+    @Req() req: Request,
+    @Param('id') id: string,
+  ) {
+    const user = await session(req);
+    assertAdmin(user);
+    const conversation = await requireConversation(user, id);
+    const calls = (await store.list<ModelCallLog>(user.orgId, 'model-call'))
+      .filter((c) => c.conversationId === id)
+      .sort((a, b) => a.at.localeCompare(b.at));
+    return {
+      conversation,
+      calls,
+      recordingEnabled: config.recordAudio,
+      retentionDays: config.retentionDays,
+    };
+  }
   @Get('recordings/:id/:index') async recording(
     @Req() req: Request,
     @Res() res: Response,
@@ -436,7 +459,18 @@ export class ApiController {
     if (!audio) throw new NotFoundException();
     const file = await getFile(audio.key);
     res.setHeader('Cache-Control', 'private, no-store');
-    res.type(file.type).send(file.body);
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.type(file.type);
+    if (req.headers.range) {
+      const range = audioRange(req.headers.range, file.body.length);
+      if (!range) {
+        res.setHeader('Content-Range', `bytes */${file.body.length}`);
+        res.status(416).end();
+        return;
+      }
+      res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${file.body.length}`);
+      res.status(206).send(file.body.subarray(range.start, range.end + 1));
+    } else res.send(file.body);
   }
   @Get('admin/users') async users(@Req() req: Request) {
     const user = await session(req);

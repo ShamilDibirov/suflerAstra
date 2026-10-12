@@ -18,11 +18,12 @@ import {
 } from '../apps/api/src/conversations';
 import { publishDocument, saveDocument } from '../apps/api/src/knowledge';
 import { deleteConversation, retention } from '../apps/api/src/infra';
-import { classify, selectEvidence } from '../apps/api/src/ai';
+import { classify, selectEvidence, inferSpeakerRoles } from '../apps/api/src/ai';
 vi.mock('../apps/api/src/ai', async (original) => ({
   ...(await original<object>()),
   classify: vi.fn(),
   selectEvidence: vi.fn(),
+  inferSpeakerRoles: vi.fn(),
 }));
 let user: SessionUser, docs: KnowledgeDocument[];
 const classification = {
@@ -321,4 +322,97 @@ it('recovers earlier unknown transcript when the enrolled employee is recognized
     role: 'consultant',
     excluded: false,
   });
+});
+
+describe('semantic speaker assignment and sessions', () => {
+  it('infers arbitrary speaker IDs, remembers roles, and respects a manual correction over a late model', async () => {
+    const c = await createConversation(user);
+    await configureConversation(user, c.id, { autoHints: false });
+    let resolve!: (value: any) => void;
+    vi.mocked(inferSpeakerRoles)
+      .mockReturnValueOnce(new Promise((r) => (resolve = r)))
+      .mockResolvedValue({});
+    const voice = {
+      ...segment('Какой телефон вам подобрать?'),
+      speakerId: 'session:7',
+      role: 'unknown' as const,
+      excluded: true,
+      roleInference: true,
+    };
+    await addSegment(user, c.id, voice);
+    await vi.waitFor(() => expect(inferSpeakerRoles).toHaveBeenCalled());
+    await assignSpeaker(user, c.id, 'session:7', 'consultant');
+    resolve({ 'session:7': { role: 'customer', source: 'model', confidence: 0.99 } });
+    await new Promise((r) => setTimeout(r, 30));
+    await addSegment(user, c.id, { ...voice, id: randomUUID(), text: 'Для каких задач?' });
+    const updated = await requireConversation(user, c.id);
+    expect(updated.segments.every((s) => s.role === 'consultant' && !s.excluded)).toBe(true);
+    expect(updated.speakerRoles?.['session:7'].source).toBe('manual');
+    await finish(user, c.id);
+  });
+  it('applies confident inferred roles without enrolling and leaves overlapping speech excluded', async () => {
+    const c = await createConversation(user);
+    await configureConversation(user, c.id, { autoHints: false });
+    vi.mocked(inferSpeakerRoles).mockResolvedValue({
+      'session:1': { role: 'customer', source: 'model', confidence: 0.95 },
+    });
+    await addSegment(user, c.id, {
+      ...segment('Ищу телефон для фотографий'),
+      role: 'unknown',
+      speakerId: 'session:1',
+      roleInference: true,
+      excluded: true,
+    });
+    await vi.waitFor(async () =>
+      expect((await requireConversation(user, c.id)).segments[0].role).toBe('customer'),
+    );
+    await addSegment(user, c.id, {
+      ...segment('Неразборчиво'),
+      role: 'unknown',
+      speakerId: 'session:1',
+      roleInference: false,
+      ambiguous: true,
+      excluded: true,
+    });
+    await addSegment(user, c.id, {
+      ...segment('Продолжим выбор'),
+      role: 'unknown',
+      speakerId: 'session:1',
+      roleInference: true,
+      excluded: true,
+    });
+    expect((await requireConversation(user, c.id)).segments[1].excluded).toBe(true);
+    await finish(user, c.id);
+  });
+  it('distinguishes a new client in a session from starting a fresh session', async () => {
+    const first = await createConversation(user);
+    const next = await createConversation(user, undefined, first.id);
+    expect(next.sessionId).toBe(first.sessionId);
+    expect(next.segments).toEqual([]);
+    await finish(user, next.id);
+    await expect(createConversation(user, undefined, next.id)).rejects.toThrow('Сессия завершена');
+    const fresh = await createConversation(user);
+    expect(fresh.sessionId).not.toBe(next.sessionId);
+    await finish(user, fresh.id);
+  });
+});
+
+it('delivers a deferred automatic hint without requiring another utterance', async () => {
+  const c = await createConversation(user);
+  await addSegment(user, c.id, segment());
+  await waitForClassification(c.id);
+  await store.mutateConversation(user.orgId, c.id, (v) => ({
+    ...v,
+    lastAutoHintAt: Date.now(),
+    hints: [],
+  }));
+  vi.useFakeTimers();
+  try {
+    expect(await makeHint(user, c.id, '', false)).toBeNull();
+    await vi.advanceTimersByTimeAsync(8100);
+    expect((await requireConversation(user, c.id)).hints.length).toBe(1);
+    await finish(user, c.id);
+  } finally {
+    vi.useRealTimers();
+  }
 });

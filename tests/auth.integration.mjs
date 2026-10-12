@@ -210,6 +210,11 @@ try {
   const a = (await call('/api/conversations', { cookie: staff, method: 'POST', body: {} })).body;
   const b = (await call('/api/conversations', { cookie: other, method: 'POST', body: {} })).body;
   assert(a.id && b.id);
+  assert.equal((await call(`/api/admin/history/${a.id}/analytics`, { cookie: staff })).status, 403);
+  assert.equal((await call(`/api/admin/history/${a.id}/analytics`, { cookie: owner })).status, 200);
+  assert.equal((await call(`/api/admin/history/${b.id}/analytics`, { cookie: owner })).status, 404);
+  assert.equal((await call(`/api/admin/history/${a.id}/analytics`)).status, 401);
+
   assert.equal((await call(`/api/conversations/${b.id}`, { cookie: staff })).status, 404);
   assert.equal((await call(`/api/recordings/${b.id}/0`, { cookie: owner })).status, 404);
   assert.equal((await call(`/api/conversations/${a.id}`, { cookie: other })).status, 404);

@@ -1,4 +1,5 @@
 'use client';
+import { RecordingPlayer } from './recording-player';
 import { useEffect, useState } from 'react';
 import { BookOpen, Search, Clock3, ArrowUpRight } from 'lucide-react';
 import type { KnowledgeDocument, Conversation } from '@sufler/shared';
@@ -133,9 +134,7 @@ export function Library({ history = false }: { history?: boolean }) {
         wide
       >
         <div className="history-detail">
-          {dialog?.recordings.map((r, i) => (
-            <audio key={r.key} controls preload="none" src={`/api/recordings/${dialog.id}/${i}`} />
-          ))}
+          {dialog && <RecordingPlayer key={dialog.id} conversation={dialog} />}
           {dialog?.segments.map((s) => (
             <div key={s.id}>
               <small>

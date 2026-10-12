@@ -3,6 +3,8 @@
 Model weights are loaded at startup; no keyword heuristic replaces diarization if loading fails.
 Employee profiles and enrollment samples persist on a private mounted directory.
 """
+from __future__ import annotations
+
 import asyncio
 import contextlib
 import hmac
@@ -14,18 +16,21 @@ import wave
 import uuid
 from contextlib import asynccontextmanager
 
-import numpy as np
-import torch
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Header, HTTPException, Body
 from fastapi.responses import Response
 from profile_store import ProfileStore
 from deepgram_stream import listen as deepgram_listen
-from pyannote.core import SlidingWindow, SlidingWindowFeature
-from diart import SpeakerDiarization, SpeakerDiarizationConfig
-from diart.models import SegmentationModel, EmbeddingModel
-from silero_vad import load_silero_vad, get_speech_timestamps
-from mistralai.client import Mistral
-from mistralai.client.models import AudioFormat
+
+# Deepgram mode never imports or downloads local ML models.
+if os.getenv("SPEECH_PROVIDER", "deepgram") == "mistral":
+    import numpy as np
+    import torch
+    from pyannote.core import SlidingWindow, SlidingWindowFeature
+    from diart import SpeakerDiarization, SpeakerDiarizationConfig
+    from diart.models import SegmentationModel, EmbeddingModel
+    from silero_vad import load_silero_vad, get_speech_timestamps
+    from mistralai.client import Mistral
+    from mistralai.client.models import AudioFormat
 
 SR = 16000
 TOKEN = os.environ.get("INTERNAL_SERVICE_TOKEN", "")
@@ -71,8 +76,10 @@ async def lifespan(app):
     required = "DEEPGRAM_API_KEY" if PROVIDER == "deepgram" else "MISTRAL_API_KEY"
     if not os.getenv(required):
         raise RuntimeError(f"{required} is required")
-    profile_store = ProfileStore(os.getenv("SPEECH_PROFILE_DIR", "/models/voice-profiles"))
-    models.update(await asyncio.to_thread(load_models))
+    if PROVIDER == "mistral":
+        profile_store = ProfileStore(os.getenv("SPEECH_PROFILE_DIR", "/models/voice-profiles"))
+    if PROVIDER == "mistral":
+        models.update(await asyncio.to_thread(load_models))
     yield
 
 
@@ -84,31 +91,32 @@ app = FastAPI(lifespan=lifespan)
 def health(x_internal_token: str = Header(default="")):
     if not TOKEN or not hmac.compare_digest(x_internal_token, TOKEN):
         raise HTTPException(401)
-    return {"ok": bool(models), "diarization": "deepgram" if PROVIDER == "deepgram" else "diart", "asr": os.getenv("DEEPGRAM_MODEL", "nova-3") if PROVIDER == "deepgram" else "voxtral-realtime", "device": str(models.get("device", "unloaded"))}
+    return {"ok": PROVIDER == "deepgram" or bool(models), "diarization": "deepgram" if PROVIDER == "deepgram" else "diart", "asr": os.getenv("DEEPGRAM_MODEL", "nova-3") if PROVIDER == "deepgram" else "voxtral-realtime", "device": str(models.get("device", "unloaded"))}
 
 
 def authorize_profile(token):
     if not TOKEN or not hmac.compare_digest(token, TOKEN):
         raise HTTPException(401)
-    if profile_store is None:
+    if profile_store is None and PROVIDER != "deepgram":
         raise HTTPException(503)
 
 @app.post("/profile/status")
 def profile_status(body: dict = Body(...), x_internal_token: str = Header(default="")):
     authorize_profile(x_internal_token)
-    value = profile_store.load(str(body.get("profileId", "")))
-    return {"available": value is not None, "savedAt": value["savedAt"] if value else None, "provider": PROVIDER, "model": os.getenv("DEEPGRAM_MODEL", "nova-3") if PROVIDER == "deepgram" else "voxtral-realtime"}
+    value = profile_store.load(str(body.get("profileId", ""))) if PROVIDER == "mistral" else None
+    return {"available": value is not None, "enrollmentRequired": PROVIDER == "mistral", "savedAt": value["savedAt"] if value else None, "provider": PROVIDER, "model": os.getenv("DEEPGRAM_MODEL", "nova-3") if PROVIDER == "deepgram" else "voxtral-realtime"}
 
 @app.post("/profile/delete")
 def profile_delete(body: dict = Body(...), x_internal_token: str = Header(default="")):
     authorize_profile(x_internal_token)
-    profile_store.delete(str(body.get("profileId", "")))
+    if profile_store:
+        profile_store.delete(str(body.get("profileId", "")))
     return {"ok": True}
 
 @app.post("/profile/sample")
 def profile_sample(body: dict = Body(...), x_internal_token: str = Header(default="")):
     authorize_profile(x_internal_token)
-    value = profile_store.load(str(body.get("profileId", "")))
+    value = profile_store.load(str(body.get("profileId", ""))) if profile_store else None
     if value is None:
         raise HTTPException(404)
     buffer = io.BytesIO()
@@ -166,6 +174,11 @@ async def stream(ws: WebSocket):
             profile_id = str(init.get("profileId", ""))[:200]
             if init.get("type") != "start" or not profile_id:
                 raise ValueError("Неверная аудиосессия")
+            if PROVIDER == "deepgram":
+                if init.get("mode") == "enroll":
+                    raise ValueError("Deepgram не требует образца голоса. Просто включите микрофон.")
+                await deepgram_listen(ws)
+                return
             if init.get("mode") == "enroll":
                 await ws.send_json({"type": "ready"})
                 parts, size = [], 0
@@ -191,12 +204,6 @@ async def stream(ws: WebSocket):
             if saved is None:
                 raise ValueError("Сначала запишите образец голоса консультанта в настройках микрофона")
             staff = np.asarray(saved["vector"], dtype=np.float32)
-            if PROVIDER == "deepgram":
-                async def identify(pcm, reference):
-                    samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768
-                    return float(np.dot(reference, await embed(samples)))
-                await deepgram_listen(ws, staff, identify)
-                return
             pipeline = SpeakerDiarization(SpeakerDiarizationConfig(
                 segmentation=models["segmentation"], embedding=models["embedding"],
                 duration=5, step=.5, latency=2, sample_rate=SR, max_speakers=8,

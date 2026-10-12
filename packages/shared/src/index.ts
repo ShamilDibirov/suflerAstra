@@ -14,6 +14,8 @@ export const SegmentSchema = z.object({
   final: z.boolean().default(true),
   excluded: z.boolean().default(false),
   createdAt: z.string(),
+  roleInference: z.boolean().optional(),
+  ambiguous: z.boolean().optional(),
 });
 export type TranscriptSegment = z.infer<typeof SegmentSchema>;
 export const FactSchema = z.object({
@@ -156,6 +158,11 @@ export interface Conversation {
   assistanceMode?: 'rag' | 'scripts';
   salesScriptId?: string | null;
   region?: string;
+  speakerRoles?: Record<
+    string,
+    { role: z.infer<typeof Role>; source: 'manual' | 'model'; confidence: number }
+  >;
+  sessionId?: string;
   autoHints: boolean;
   lastAutoHintAt: number;
   generationEpoch: number;
@@ -223,8 +230,8 @@ export const MODEL_DEFAULTS: ModelConfig[] = [
     testError: null,
   },
   {
-    id: 'kimi-k3',
-    name: 'Kimi K3',
+    id: 'kimi-k2.5',
+    name: 'Kimi K2.5 · без thinking',
     enabled: true,
     isDefault: false,
     testedAt: null,
@@ -297,3 +304,22 @@ export type PromptSettings = z.infer<typeof PromptInput> & {
   revision: number;
   updatedAt: string | null;
 };
+
+export interface ModelCallLog {
+  id: string;
+  conversationId: string;
+  type: string;
+  model: string;
+  at: string;
+  latencyMs: number;
+  status: 'ok' | 'error' | 'cancelled';
+  httpStatus?: number;
+  inputTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+  requestId?: string;
+  error?: string;
+  result?: string;
+  revision: number;
+  reasoning: 'disabled' | 'decision';
+}

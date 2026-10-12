@@ -10,6 +10,7 @@ export function useAudio(conversationId: string | undefined, onEvent: (event: Ap
     [level, setLevel] = useState(0),
     [enrolled, setEnrolled] = useState(false),
     [provider, setProvider] = useState(''),
+    [enrollmentRequired, setEnrollmentRequired] = useState(false),
     [draining, setDraining] = useState(false);
   const paused = useRef(false);
   const enrolling = useRef(false);
@@ -41,10 +42,16 @@ export function useAudio(conversationId: string | undefined, onEvent: (event: Ap
     setEnrolled(false);
     setProvider('');
     let current = true;
-    void api<{ available: boolean; provider?: string; model?: string }>('/voice-profile')
+    void api<{
+      available: boolean;
+      provider?: string;
+      model?: string;
+      enrollmentRequired?: boolean;
+    }>('/voice-profile')
       .then((profile) => {
         if (!current) return;
         setEnrolled(profile.available);
+        setEnrollmentRequired(profile.enrollmentRequired === true);
         setProvider([profile.provider, profile.model].filter(Boolean).join(' · '));
       })
       .catch(() => {});
@@ -228,6 +235,44 @@ export function useAudio(conversationId: string | undefined, onEvent: (event: Ap
     cleanup();
     setStatus('paused');
   }
+  async function stopAndWait() {
+    const ws = socket.current;
+    if (
+      !ws ||
+      ws.readyState !== WebSocket.OPEN ||
+      (!draining &&
+        !['listening', 'connecting', 'reconnecting', 'enrolling', 'finishing'].includes(status))
+    ) {
+      stop();
+      return;
+    }
+    await new Promise<void>((resolve, reject) => {
+      const done = (error?: Error) => {
+        clearTimeout(timer);
+        ws.removeEventListener('message', onMessage);
+        ws.removeEventListener('close', onClose);
+        error ? reject(error) : resolve();
+      };
+      const onMessage = (e: MessageEvent) => {
+        const event = JSON.parse(e.data);
+        if (event.type === 'audio.status' && event.data.status === 'stopped') done();
+      };
+      const onClose = () =>
+        done(new Error('Соединение прервано. Дождитесь сохранения записи и повторите завершение.'));
+      const timer = setTimeout(
+        () =>
+          done(
+            new Error(
+              'Аудиосервис ещё завершает запись. Повторите завершение через несколько секунд.',
+            ),
+          ),
+        20000,
+      );
+      ws.addEventListener('message', onMessage);
+      ws.addEventListener('close', onClose);
+      stop();
+    });
+  }
   function assign(speakerId: string, role: 'customer' | 'consultant' | 'bystander') {
     socket.current?.send(JSON.stringify({ type: 'audio.assign', speakerId, role }));
   }
@@ -238,7 +283,9 @@ export function useAudio(conversationId: string | undefined, onEvent: (event: Ap
     setDeviceId,
     level,
     enrolled,
+    enrollmentRequired,
     provider,
+    stopAndWait,
     setEnrolled,
     draining,
     start,

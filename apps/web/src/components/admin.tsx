@@ -34,6 +34,7 @@ import { useSession } from '@/hooks/use-session';
 import { Shell, LoadingScreen } from './shell';
 import { Button } from './ui/button';
 import { Dialog } from './ui/dialog';
+import { HistoryAnalytics } from './history-analytics';
 import { PromptEditor } from './prompt-editor';
 type Overview = {
   documents: number;
@@ -1081,14 +1082,7 @@ export function Admin({ section }: { section: string }) {
         wide
       >
         <div className="history-detail">
-          {detail?.recordings.map((r, i) => (
-            <div key={r.key}>
-              <small>
-                Аудио · {Math.round(r.startMs / 1000)}–{Math.round(r.endMs / 1000)} с
-              </small>
-              <audio controls preload="none" src={`/api/recordings/${detail.id}/${i}`} />
-            </div>
-          ))}
+          {detail && <HistoryAnalytics key={detail.id} initial={detail} />}
           {detail?.segments.map((s) => (
             <div key={s.id} className="transcript-row">
               <span className="speaker-avatar">
@@ -1106,7 +1100,8 @@ export function Admin({ section }: { section: string }) {
           {detail?.hints.map((h) => (
             <div className="source-quote" key={h.id}>
               <small>
-                Подсказка · {h.modelId} · {h.inputTokens + h.outputTokens} токенов
+                Подсказка · {h.modelId} · {h.inputTokens + h.outputTokens} токенов ·{' '}
+                {(h.latencyMs / 1000).toFixed(2)} с · {h.status}
               </small>
               <p>{h.text}</p>
             </div>

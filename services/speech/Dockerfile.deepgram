@@ -1,0 +1,8 @@
+FROM python:3.11-slim-bookworm
+ENV PYTHONUNBUFFERED=1 SPEECH_PROVIDER=deepgram
+WORKDIR /app
+RUN pip install --no-cache-dir fastapi==0.135.1 uvicorn==0.41.0 websockets==17.2 && useradd --create-home worker && mkdir /models && chown worker /models
+COPY --chown=worker services/speech/main.py services/speech/profile_store.py services/speech/deepgram_stream.py ./
+USER worker
+EXPOSE 8001
+CMD ["uvicorn", "main:app", "--host", "::", "--port", "8001", "--no-access-log"]

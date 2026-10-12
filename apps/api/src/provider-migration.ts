@@ -5,7 +5,8 @@ import { store } from './store';
 const aliases: Record<string, string> = {
   'qwen/qwen3.5-9b': 'qwen3.8-27b',
   'qwen/qwen3.5-35b-a3b': 'qwen3.8-max',
-  'moonshotai/kimi-k2.5': 'kimi-k3',
+  'moonshotai/kimi-k2.5': 'kimi-k2.5',
+  'kimi-k3': 'kimi-k2.5',
 };
 export async function migrateModelStudio() {
   for (const org of await store.organizations()) {
