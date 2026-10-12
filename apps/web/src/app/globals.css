@@ -1096,7 +1096,9 @@ kbd {
   z-index: 50;
   max-height: 90dvh;
   width: min(540px, calc(100vw - 28px));
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   box-shadow: 0 20px 80px #33254d25;
   border: 1px solid #eae2f4;
   border-radius: 18px;
@@ -2309,4 +2311,27 @@ kbd {
   white-space: nowrap;
   background: white;
   box-shadow: 0 8px 24px #1a10351a;
+}
+
+/* Constrain the flex child, so long history and transcript remain reachable. */
+.dialog-heading {
+  flex-shrink: 0;
+}
+.dialog-body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.dialog-playback {
+  min-width: 0;
+}
+.playback-transcript {
+  max-height: min(440px, 40dvh);
+  scrollbar-gutter: stable;
+  touch-action: pan-y;
+}
+.transcript-list {
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  touch-action: pan-y;
 }

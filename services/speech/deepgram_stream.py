@@ -23,6 +23,11 @@ def groups(words):
     return result
 
 
+def turn_confidence(words):
+    # A single uncertain filler must not discard an otherwise clear whole turn.
+    return sum(float(w.get('confidence', 0)) for w in words) / len(words) if words else 0
+
+
 async def listen(ws):
     key = os.environ.get('DEEPGRAM_API_KEY', '')
     if not key:
@@ -59,7 +64,7 @@ async def listen(ws):
                 role = 'unknown' if ambiguous else roles.get(speaker, 'unknown')
                 if role == 'bystander':
                     continue
-                confidence = min(float(w.get('confidence', 0)) for w in group['words'])
+                confidence = turn_confidence(group['words'])
                 await ws.send_json({'type': 'segment', 'text': text, 'role': role,
                                     'speakerId': f'{namespace}:{speaker}', 'startMs': round(group['start'] * 1000),
                                     'endMs': round(group['end'] * 1000), 'confidence': confidence,

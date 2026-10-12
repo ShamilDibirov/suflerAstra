@@ -77,3 +77,8 @@ class DeepgramTest(unittest.IsolatedAsyncioTestCase):
         result = gateway.groups(words)
         self.assertEqual([g['speaker'] for g in result[:2]], ['0', '1'])
         self.assertTrue(result[2]['speaker'].startswith('unassigned'))
+
+    def test_one_uncertain_word_does_not_discard_a_clear_turn(self):
+        self.assertAlmostEqual(gateway.turn_confidence([{'confidence': .99}] * 9 + [{'confidence': .1}]), .901)
+        self.assertLess(gateway.turn_confidence([{'confidence': .1}] * 4), .7)
+        self.assertEqual(gateway.turn_confidence([]), 0)

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { SegmentSchema, PatchSchema, NO_EVIDENCE } from '../packages/shared/src/index';
 import {
   emptyCard,
+  compactContext,
   applyPatch,
   eligibleSegments,
   verifiedEvidence,
@@ -30,7 +31,7 @@ const patch = (values = {}) =>
     ...values,
   });
 describe('evidence and conversation invariants', () => {
-  it('includes only assigned, final, confident speech', () => {
+  it('includes clear unassigned Deepgram participants but excludes bystanders and overlap', () => {
     const list = [
       segment(),
       segment({ id: 's2', role: 'bystander' }),
@@ -38,8 +39,11 @@ describe('evidence and conversation invariants', () => {
       segment({ id: 's4', confidence: 0.5 }),
       segment({ id: 's5', excluded: true }),
       segment({ id: 's6', final: false }),
+      segment({ id: 's7', role: 'unknown', roleInference: true }),
+      segment({ id: 's8', ambiguous: true }),
+      segment({ id: 's9', role: 'unknown', roleInference: true, excluded: true }),
     ];
-    expect(eligibleSegments(list).map((s) => s.id)).toEqual(['s1']);
+    expect(eligibleSegments(list).map((s) => s.id)).toEqual(['s1', 's7']);
   });
   it('accepts only exact fact values backed by an eligible segment', () => {
     const facts = [
@@ -137,4 +141,22 @@ describe('audio frame integrity', () => {
     expect(() => decodeAudioFrame(frame, 3, 1600)).toThrow();
     expect(() => decodeAudioFrame(frame, 4, 0)).toThrow();
   });
+});
+
+it('keeps recent speech and valid JSON when the context budget is exhausted', () => {
+  const card = emptyCard('c');
+  card.facts = Array.from({ length: 12 }, (_, i) => ({
+    key: `need_${i}`,
+    value: 'Фото',
+    quote: 'Фото'.repeat(95),
+    segmentId: `old-${i}`,
+  }));
+  const turns = Array.from({ length: 30 }, (_, i) =>
+    segment({ id: `s${i}`, text: `Уточнение ${i}: ` + 'нужен телефон '.repeat(40) }),
+  );
+  const context = compactContext(card, turns, 3800);
+  expect(context.length).toBeLessThanOrEqual(3800);
+  const parsed = JSON.parse(context);
+  expect(parsed.recent.at(-1).id).toBe('s29');
+  expect(parsed.card.facts.length).toBeGreaterThan(0);
 });

@@ -25,15 +25,26 @@ export function RecordingPlayer({ conversation: c }: { conversation: Conversatio
     return p ? (p.offset + ms - p.startMs) / 1000 : null;
   };
   const active = c.segments.filter((s) => time >= s.startMs && time < s.endMs);
-  const update = () => {
+  const update = (forceFollow = false) => {
     const ms = (player.current?.currentTime || 0) * 1000,
       p = layout.find((r) => ms >= r.offset && ms < r.offset + r.endMs - r.startMs);
     const absolute = p ? p.startMs + ms - p.offset : -1;
     setTime(absolute);
     const id = c.segments.find((s) => absolute >= s.startMs && absolute < s.endMs)?.id;
-    if (follow && id && lastActive.current !== id) {
+    if ((follow || forceFollow) && id && lastActive.current !== id) {
       const el = list.current?.querySelector<HTMLElement>(`[data-segment="${CSS.escape(id)}"]`);
-      el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      const container = list.current;
+      if (el && container) {
+        const top =
+          el.getBoundingClientRect().top -
+          container.getBoundingClientRect().top +
+          container.scrollTop;
+        if (
+          top < container.scrollTop ||
+          top + el.clientHeight > container.scrollTop + container.clientHeight
+        )
+          container.scrollTo({ top: top - 12, behavior: 'smooth' });
+      }
       lastActive.current = id;
     }
   };
@@ -52,8 +63,8 @@ export function RecordingPlayer({ conversation: c }: { conversation: Conversatio
               controls
               preload="metadata"
               src={`/api/conversations/${c.id}/audio`}
-              onTimeUpdate={update}
-              onSeeked={update}
+              onTimeUpdate={() => update()}
+              onSeeked={() => update()}
               onEnded={() => setTime(-1)}
               onError={() =>
                 setError('Запись недоступна. Проверьте хранилище или повторите позже.')
@@ -82,7 +93,7 @@ export function RecordingPlayer({ conversation: c }: { conversation: Conversatio
                 onClick={() => {
                   setFollow(true);
                   lastActive.current = '';
-                  update();
+                  update(true);
                 }}
               >
                 Следовать за аудио
@@ -107,6 +118,9 @@ export function RecordingPlayer({ conversation: c }: { conversation: Conversatio
       <div
         ref={list}
         className="playback-transcript"
+        tabIndex={0}
+        aria-label="Расшифровка записи"
+        onPointerDown={() => setFollow(false)}
         onWheel={() => setFollow(false)}
         onTouchMove={() => setFollow(false)}
         onKeyDown={(e) => {

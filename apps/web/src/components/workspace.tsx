@@ -791,7 +791,7 @@ export function Workspace() {
                 </div>
               </section>
             )}
-            <div className="transcript-list">
+            <div className="transcript-list" tabIndex={0} aria-label="Ход разговора">
               {!conversation?.segments.length && (
                 <div className="empty-state" style={{ padding: 15 }}>
                   <AudioLines size={24} />
@@ -807,7 +807,7 @@ export function Workspace() {
                     <div className="speech-meta">
                       <strong>
                         {s.role === 'unknown' && s.roleInference
-                          ? `Спикер ${Number(s.speakerId.split(':').at(-1)) + 1} · определяем роль`
+                          ? `Спикер ${Number(s.speakerId.split(':').at(-1)) + 1} · роль уточняется`
                           : roleLabels[s.role]}
                       </strong>
                       <time>{formatTime(s.createdAt)}</time>
@@ -902,7 +902,17 @@ export function Workspace() {
               <dl className="context-group">
                 <dt>Намерение</dt>
                 <dd>
-                  {docs.find((d) => d.intent === card?.intent)?.title || 'Уточняем запрос клиента'}
+                  {docs.find((d) => d.intent === card?.intent)?.title ||
+                    (
+                      {
+                        sales_discovery: 'Выявление потребности',
+                        device_selection: 'Подбор устройства',
+                        tariff_selection: 'Подбор тарифа или услуги',
+                        accessories: 'Подбор аксессуаров',
+                        sales_objection: 'Работа с возражением',
+                      } as Record<string, string>
+                    )[card?.intent || ''] ||
+                    'Уточняем запрос клиента'}
                 </dd>
               </dl>
               <dl className="context-group">

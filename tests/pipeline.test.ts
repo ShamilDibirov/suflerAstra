@@ -146,9 +146,12 @@ describe('server authorization and asynchronous state', () => {
   });
   it('does not allow a newly classified card to reuse an earlier hint revision', async () => {
     const c = await createConversation(user);
+    const hint = await makeHint(user, c.id);
     await addSegment(user, c.id, segment());
     await waitForClassification(c.id);
-    expect((await requireConversation(user, c.id)).card.revision).toBe(2);
+    const updated = await requireConversation(user, c.id);
+    expect(updated.card.revision).toBeGreaterThan(hint!.revision);
+    expect(updated.hints.find((h) => h.id === hint!.id)?.status).toBe('stale');
   });
   it('withdraws a displayed hint when its source expires during a conversation', async () => {
     const c = await createConversation(user);
@@ -415,4 +418,67 @@ it('delivers a deferred automatic hint without requiring another utterance', asy
   } finally {
     vi.useRealTimers();
   }
+});
+
+it('keeps unassigned Deepgram speech in context and coalesces fragments without starving updates', async () => {
+  const c = await createConversation(user);
+  let release!: (value: typeof classification) => void;
+  vi.mocked(inferSpeakerRoles).mockResolvedValue({});
+  vi.mocked(classify).mockReturnValueOnce(
+    new Promise((resolve) => {
+      release = resolve;
+    }),
+  );
+  const voice = (text: string) => ({
+    ...segment(text),
+    role: 'unknown' as const,
+    speakerId: 'stream:0',
+    roleInference: true,
+    excluded: true,
+  });
+  await addSegment(user, c.id, voice('Нужна сим-карта'));
+  await vi.waitFor(() => expect(classify).toHaveBeenCalledOnce());
+  const signal = vi.mocked(classify).mock.calls[0][2];
+  await addSegment(user, c.id, voice('Для роутера'));
+  await addSegment(user, c.id, voice('На даче, до 500 рублей'));
+  expect(signal.aborted).toBe(false);
+  expect(classify).toHaveBeenCalledOnce();
+  release(classification);
+  await vi.waitFor(() => expect(classify).toHaveBeenCalledTimes(2));
+  const second = vi.mocked(classify).mock.calls[1][0];
+  expect(second.segments).toHaveLength(3);
+  expect(second.segments.every((s) => !s.excluded && s.role === 'unknown')).toBe(true);
+  await vi.waitFor(async () =>
+    expect((await requireConversation(user, c.id)).card.revision).toBe(2),
+  );
+  await finish(user, c.id);
+});
+
+it('lets an automatic hint finish while more speech arrives and then analyzes the latest snapshot', async () => {
+  const c = await createConversation(user);
+  vi.mocked(classify).mockResolvedValue({
+    ...classification,
+    patch: { ...classification.patch, shouldHint: true },
+  });
+  let release!: (value: Awaited<ReturnType<typeof selectEvidence>>) => void;
+  vi.mocked(selectEvidence).mockReturnValueOnce(
+    new Promise((resolve) => {
+      release = resolve;
+    }),
+  );
+  await addSegment(user, c.id, segment());
+  await vi.waitFor(() => expect(selectEvidence).toHaveBeenCalledOnce());
+  const signal = vi.mocked(selectEvidence).mock.calls[0][3];
+  await addSegment(user, c.id, segment('Паспорт с собой'));
+  expect(signal.aborted).toBe(false);
+  release({
+    selection: [{ documentId: docs[0].id, blockId: docs[0].blocks[0].id }],
+    inputTokens: 10,
+    outputTokens: 3,
+  });
+  await vi.waitFor(async () =>
+    expect((await requireConversation(user, c.id)).hints).toHaveLength(1),
+  );
+  await vi.waitFor(() => expect(classify).toHaveBeenCalledTimes(2));
+  await finish(user, c.id);
 });

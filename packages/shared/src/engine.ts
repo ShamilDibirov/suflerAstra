@@ -64,8 +64,11 @@ export function eligibleSegments(segments: TranscriptSegment[]) {
     (s) =>
       s.final &&
       !s.excluded &&
+      !s.ambiguous &&
       s.confidence >= 0.7 &&
-      (s.role === 'customer' || s.role === 'consultant'),
+      (s.role === 'customer' ||
+        s.role === 'consultant' ||
+        (s.role === 'unknown' && s.roleInference)),
   );
 }
 export function maskPII(text: string): string {
@@ -209,9 +212,14 @@ export function compactContext(
   limit = 5200,
 ) {
   const recent = eligibleSegments(segments)
-    .slice(-6)
-    .map((s) => ({ id: s.id, role: s.role, text: maskPII(s.text).slice(0, 550) }));
-  return JSON.stringify({
+    .slice(-12)
+    .map((s) => ({
+      id: s.id,
+      speaker: s.speakerId,
+      role: s.role,
+      text: maskPII(s.text).slice(0, 550),
+    }));
+  const payload = {
     card: {
       direction: card.direction,
       intent: card.intent,
@@ -224,5 +232,17 @@ export function compactContext(
       ending: card.ending,
     },
     recent,
-  }).slice(0, limit);
+  };
+  // Reserve room for the newest speech. Cutting a serialized string used to
+  // drop precisely the new information and could produce malformed JSON.
+  const budget = Math.max(1200, limit);
+  while (JSON.stringify(payload).length > budget && payload.recent.length > 6)
+    payload.recent = payload.recent.slice(1);
+  while (JSON.stringify(payload).length > budget && payload.card.facts.length > 4)
+    payload.card.facts = payload.card.facts.slice(1);
+  while (JSON.stringify(payload).length > budget && payload.recent.length > 1)
+    payload.recent = payload.recent.slice(1);
+  while (JSON.stringify(payload).length > budget && payload.card.facts.length)
+    payload.card.facts = payload.card.facts.slice(1);
+  return JSON.stringify(payload);
 }

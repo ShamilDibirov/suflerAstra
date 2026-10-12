@@ -347,7 +347,10 @@ export function setupLive(server: Server) {
                               text: maskPII(parsed.text),
                               id: randomUUID(),
                               final: true,
-                              excluded: !['customer', 'consultant'].includes(parsed.role),
+                              excluded:
+                                !!parsed.ambiguous ||
+                                parsed.role === 'bystander' ||
+                                (parsed.role === 'unknown' && !parsed.roleInference),
                               createdAt: new Date().toISOString(),
                             },
                           ],
@@ -356,7 +359,10 @@ export function setupLive(server: Server) {
                           ...parsed,
                           id: randomUUID(),
                           final: true,
-                          excluded: !['customer', 'consultant'].includes(parsed.role),
+                          excluded:
+                            !!parsed.ambiguous ||
+                            parsed.role === 'bystander' ||
+                            (parsed.role === 'unknown' && !parsed.roleInference),
                           createdAt: new Date().toISOString(),
                         });
                   });

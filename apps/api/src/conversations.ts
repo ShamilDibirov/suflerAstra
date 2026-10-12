@@ -30,6 +30,8 @@ import { getPrompts } from './prompts';
 import { ensureSession, sessionKey, finishWorkingSession } from './working-sessions';
 
 const autoTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const analysisJobs = new Map<string, { promise: Promise<void> }>();
+const pendingAnalysis = new Set<string>();
 const roleJobs = new Map<string, AbortController>();
 const classifiers = new Map<string, AbortController>(),
   generators = new Map<string, AbortController>();
@@ -77,6 +79,8 @@ function update(c: Conversation) {
   emit(c.orgId, c.userId, { type: 'conversation.updated', conversationId: c.id, data: c });
 }
 export function cancel(id: string) {
+  pendingAnalysis.delete(id);
+  analysisJobs.delete(id);
   clearTimeout(autoTimers.get(id));
   autoTimers.delete(id);
   classifiers.get(id)?.abort();
@@ -154,6 +158,8 @@ export async function finish(user: SessionUser, id: string) {
 export async function addSegment(user: SessionUser, id: string, segment: TranscriptSegment) {
   const current = await requireConversation(user, id, true);
   if (current.status !== 'active') throw new BadRequestException('Разговор завершён');
+  if (segment.role === 'unknown' && segment.roleInference && !segment.ambiguous)
+    segment = { ...segment, excluded: false };
   const known = current.speakerRoles?.[segment.speakerId];
   if (known && !segment.ambiguous)
     segment = { ...segment, role: known.role, excluded: known.role === 'bystander' };
@@ -173,7 +179,8 @@ export async function addSegment(user: SessionUser, id: string, segment: Transcr
       eligibleSegments([segment]).length > 0 &&
       !/^(м[мх]+|э[эм]+)[.!?\s]*$/i.test(segment.text.trim());
 
-    const next = meaningful ? invalidate(v) : v;
+    // Append-only speech must not cancel a completed-prefix analysis. Corrections still invalidate.
+    const next = { ...v };
     const prior =
       meaningful && segment.speakerId !== 'manual'
         ? v.segments.map((s) =>
@@ -182,17 +189,24 @@ export async function addSegment(user: SessionUser, id: string, segment: Transcr
               : s,
           )
         : v.segments;
-    next.segments = [...prior, { ...segment, text: maskPII(segment.text) }];
+    const recovered = prior.map((s) =>
+      s.role === 'unknown' &&
+      s.roleInference &&
+      !s.ambiguous &&
+      v.speakerRoles?.[s.speakerId]?.source !== 'manual'
+        ? { ...s, excluded: false }
+        : s,
+    );
+    next.segments = [...recovered, { ...segment, text: maskPII(segment.text) }];
     next.error = null;
     next.lastConfirmedAt = new Date().toISOString();
     return next;
   });
   if (!c) return current;
-  if (meaningful) cancel(id);
   update(c);
   if (segment.roleInference && segment.role === 'unknown' && !segment.ambiguous)
     void resolveRoles(user, id).catch((e) => recordError(user, id, e));
-  if (meaningful) void classifyLatest(user, c).catch((e) => recordError(user, id, e));
+  if (meaningful) scheduleAnalysis(user, id);
   return c;
 }
 async function resolveRoles(user: SessionUser, id: string) {
@@ -212,7 +226,9 @@ async function resolveRoles(user: SessionUser, id: string) {
         if (v.status !== 'active') return null;
         const accepted = Object.fromEntries(
           Object.entries(roles).filter(
-            ([speaker]) => v.speakerRoles?.[speaker]?.source !== 'manual',
+            ([speaker, role]) =>
+              v.speakerRoles?.[speaker]?.source !== 'manual' &&
+              v.speakerRoles?.[speaker]?.role !== role.role,
           ),
         );
         if (!Object.keys(accepted).length) return null;
@@ -229,7 +245,7 @@ async function resolveRoles(user: SessionUser, id: string) {
       if (c) {
         cancel(id);
         update(c);
-        void classifyLatest(user, c).catch((e) => recordError(user, id, e));
+        scheduleAnalysis(user, id);
       }
     }
   } finally {
@@ -260,7 +276,7 @@ export async function assignSpeaker(
   });
   if (c) {
     update(c);
-    if (role !== 'bystander') void classifyLatest(user, c).catch((e) => recordError(user, id, e));
+    scheduleAnalysis(user, id);
   }
   return c;
 }
@@ -308,7 +324,7 @@ export async function editSegment(
   });
   if (c) {
     update(c);
-    void classifyLatest(user, c).catch((e) => recordError(user, id, e));
+    scheduleAnalysis(user, id);
   }
   return c;
 }
@@ -321,7 +337,34 @@ async function recordError(user: SessionUser, id: string, error: unknown) {
   if (c) update(c);
 }
 export async function reclassify(user: SessionUser, c: Conversation) {
-  if (!c.mergedInto && c.segments.length) await classifyLatest(user, c, c.status === 'completed');
+  if (c.mergedInto || !c.segments.length) return;
+  if (c.status === 'active') await scheduleAnalysis(user, c.id);
+  else await classifyLatest(user, c, true);
+}
+// One pipeline per conversation. New ASR fragments coalesce into the next snapshot;
+// model switches, corrections and client boundaries explicitly cancel the job.
+function scheduleAnalysis(user: SessionUser, id: string) {
+  pendingAnalysis.add(id);
+  const existing = analysisJobs.get(id);
+  if (existing) return existing.promise;
+  const job = { promise: Promise.resolve() };
+  analysisJobs.set(id, job);
+  job.promise = (async () => {
+    try {
+      while (analysisJobs.get(id) === job && pendingAnalysis.delete(id)) {
+        const latest = await requireConversation(user, id, true);
+        if (analysisJobs.get(id) !== job || latest.status !== 'active') break;
+        try {
+          await classifyLatest(user, latest);
+        } catch (e) {
+          if (analysisJobs.get(id) === job) await recordError(user, id, e);
+        }
+      }
+    } finally {
+      if (analysisJobs.get(id) === job) analysisJobs.delete(id);
+    }
+  })().catch((e) => recordError(user, id, e));
+  return job.promise;
 }
 async function classifyLatest(user: SessionUser, snapshot: Conversation, historical = false) {
   const controller = new AbortController();
@@ -374,7 +417,7 @@ async function classifyLatest(user: SessionUser, snapshot: Conversation, histori
       )
         return null;
       const next = invalidate(v);
-      next.card = applyPatch(next.card, result.patch, v.segments, result.source);
+      next.card = applyPatch(next.card, result.patch, snapshot.segments, result.source);
       const pinned =
         (v.assistanceMode || config.defaultAssistanceMode) === 'scripts' && v.salesScriptId
           ? docs.find((d) => d.id === v.salesScriptId && d.direction === 'sales')
@@ -506,6 +549,13 @@ export async function configureConversation(
     return n;
   });
   if (c) update(c);
+  if (
+    c &&
+    c.segments.length &&
+    !patch.intent &&
+    (patch.autoHints === true || patch.modelId || patch.assistanceMode)
+  )
+    void scheduleAnalysis(user, id);
   if (c && (patch.completedStep || patch.salesScriptId !== undefined)) {
     await makeHint(user, id, '', true);
     return requireConversation(user, id, true);
@@ -532,7 +582,7 @@ export async function makeHint(
       )
     : undefined;
   if (!manual && !c.autoHints) return null;
-  const remaining = 8000 - (Date.now() - c.lastAutoHintAt);
+  const remaining = 3000 - (Date.now() - c.lastAutoHintAt);
   if (!manual && !urgent && remaining > 0) {
     clearTimeout(autoTimers.get(id));
     autoTimers.set(

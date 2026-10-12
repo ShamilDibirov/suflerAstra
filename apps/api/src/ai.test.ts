@@ -73,8 +73,8 @@ describe('provider contracts with mocked responses (not model quality)', () => {
     expect(r.source).toBe('decision');
     expect(r.patch.intent).toBe('sim_replacement');
     expect(r.patch.shouldHint).toBe(true);
-    expect(r.usage.inputTokens).toBe(120);
-    expect(generateText).not.toHaveBeenCalled();
+    expect(r.usage.inputTokens).toBe(150);
+    expect(generateText).toHaveBeenCalledOnce();
     const [url, options] = fetchMock.mock.calls[0];
     expect(url).toBe('https://test.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/systemone');
     const request = JSON.parse(options.body);
@@ -267,4 +267,33 @@ it('requires both boundary signals, ordered transcript anchors and 0.9 confidenc
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(data)));
     expect(await inferBoundary(c, new AbortController().signal)).toBe(expected);
   }
+});
+
+it('extracts concrete needs even when the decision freeValues gate is low, preserving evidence and resolved questions', async () => {
+  const c = card();
+  c.segments.push(
+    SegmentSchema.parse({
+      id: 's2',
+      role: 'unknown',
+      roleInference: true,
+      text: 'Для роутера на даче, бюджет до 500 рублей',
+      createdAt: new Date().toISOString(),
+    }),
+  );
+  const facts = [
+    { key: 'need_1', value: 'Для роутера на даче', quote: 'Для роутера на даче', segmentId: 's2' },
+    { key: 'budget', value: '500 рублей', quote: 'бюджет до 500 рублей', segmentId: 's2' },
+    { key: 'invented', value: 'безлимит', quote: 'безлимит', segmentId: 's2' },
+  ];
+  c.card.missing = ['Для какого устройства?', 'Какой бюджет?'];
+  vi.mocked(generateText).mockResolvedValue({
+    output: { facts, missing: [] },
+    usage: { inputTokens: 40, outputTokens: 20 },
+  } as never);
+  const result = await classify(c, demoDocuments('org'), new AbortController().signal);
+  expect(result.patch.needs).toEqual(['Для роутера на даче']);
+  expect(result.patch.facts).toEqual(facts.slice(0, 2));
+  expect(result.patch.missing).toEqual([]);
+  expect(result.patch.stage).toBe('clarification');
+  expect(generateText).toHaveBeenCalledOnce();
 });
