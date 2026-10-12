@@ -99,7 +99,8 @@ describe('evidence and conversation invariants', () => {
       'org',
       card,
     );
-    expect(renderHint(card, refs, 'qwen').text).toBe(doc.blocks[0].text);
+    expect(renderHint(card, refs, 'qwen').text).toBe(`**Следующий шаг**\n\n${doc.blocks[0].text}`);
+    expect(renderHint(card, refs, 'qwen').blocks[0].quote).toBe(doc.blocks[0].text);
     expect(renderHint(card, [], 'kimi').text).toBe(NO_EVIDENCE);
   });
   it('treats expiry as inclusive, using UTC dates', () => {

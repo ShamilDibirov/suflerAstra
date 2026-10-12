@@ -131,6 +131,7 @@ export interface Hint {
   modelId: string;
   createdAt: string;
   latencyMs: number;
+  pipelineLatencyMs?: number;
   inputTokens: number;
   outputTokens: number;
   cost: number | null;
@@ -163,11 +164,15 @@ export interface Conversation {
     { role: z.infer<typeof Role>; source: 'manual' | 'model'; confidence: number }
   >;
   sessionId?: string;
+  audioStartMs?: number;
+  audioEndMs?: number;
+  mergedInto?: string;
+  lastConfirmedAt?: string;
   autoHints: boolean;
   lastAutoHintAt: number;
   generationEpoch: number;
   error: string | null;
-  recordings: { key: string; startMs: number; endMs: number }[];
+  recordings: AudioSlice[];
 }
 export const ModelInput = z.object({
   id: z
@@ -198,6 +203,7 @@ export interface AppEvent {
     | 'context.status'
     | 'audio.status'
     | 'session.boundary'
+    | 'client.switched'
     | 'error';
   conversationId?: string;
   scope?: 'audio' | 'assistant' | 'storage';
@@ -314,12 +320,56 @@ export interface ModelCallLog {
   latencyMs: number;
   status: 'ok' | 'error' | 'cancelled';
   httpStatus?: number;
-  inputTokens: number;
-  outputTokens: number;
-  reasoningTokens: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  reasoningTokens: number | null;
+  cachedTokens?: number | null;
+  costUsd?: number | null;
+  costSource?: 'estimated' | 'provider' | 'unknown';
+  tariff?: ModelTariff | null;
+  userId?: string;
+  sessionId?: string;
   requestId?: string;
   error?: string;
   result?: string;
   revision: number;
   reasoning: 'disabled' | 'decision';
+}
+
+export interface AudioSlice {
+  key: string;
+  startMs: number;
+  endMs: number;
+  sourceStartMs?: number;
+}
+export interface ModelTariff {
+  id: string;
+  modelId: string;
+  input: number;
+  output: number;
+  cached: number;
+  effectiveAt: string;
+  createdAt: string;
+  currency: 'USD';
+}
+export interface ClientBoundary {
+  id: string;
+  fromId: string;
+  toId: string;
+  segmentId: string;
+  atMs: number;
+  undoUntil: string;
+  status: 'applied' | 'undone';
+  at: string;
+}
+export interface WorkingSession {
+  id: string;
+  orgId: string;
+  userId: string;
+  activeId: string;
+  status: 'active' | 'completed';
+  revision: number;
+  timelineMs: number;
+  boundaries: ClientBoundary[];
+  createdAt: string;
 }

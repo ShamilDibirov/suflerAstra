@@ -5,14 +5,19 @@ import { z } from 'zod';
 import { session, assertOrigin } from './auth';
 import { config } from './config';
 import { events, emit } from './events';
-import {
-  addSegment,
-  requireConversation,
-  createConversation,
-  assignSpeaker,
-} from './conversations';
+import { addSegment, requireConversation, assignSpeaker } from './conversations';
+import { maskPII } from '@sufler/shared/engine';
 import { store } from './store';
-import { putFile, deleteFile } from './storage';
+import {
+  ensureSession,
+  requireWorkSession,
+  saveSessionAudio,
+  checkClientBoundary,
+  noteSessionTime,
+  forgetSessionTime,
+  sessionKey,
+} from './working-sessions';
+import { putFile } from './storage';
 import { decodeAudioFrame, type AppEvent, type Conversation } from '@sufler/shared';
 
 function wav(pcm: Buffer) {
@@ -31,6 +36,7 @@ function wav(pcm: Buffer) {
   h.writeUInt32LE(pcm.length, 40);
   return Buffer.concat([h, pcm]);
 }
+const connections = new Set<string>();
 export function setupLive(server: Server) {
   const wss = new WebSocketServer({ noServer: true, maxPayload: 65536 });
   server.on('upgrade', async (req, socket, head) => {
@@ -42,8 +48,18 @@ export function setupLive(server: Server) {
     try {
       assertOrigin(req);
       const user = await session(req);
-      const id = url.searchParams.get('conversationId');
-      if (id) await requireConversation(user, id, true);
+      const requested = url.searchParams.get('sessionId');
+      const legacy = url.searchParams.get('conversationId');
+      const initial = requested
+        ? await requireWorkSession(user, requested)
+        : legacy
+          ? await ensureSession(user, await requireConversation(user, legacy, true))
+          : null;
+      if (!initial || initial.status !== 'active' || connections.has(initial.id))
+        throw new Error('Сессия недоступна или уже подключена');
+      const id = initial.activeId,
+        workId = initial.id;
+      connections.add(workId);
       wss.handleUpgrade(req, socket, head, (ws) => {
         let speech: WebSocket | null = null,
           conversationId = id,
@@ -57,7 +73,8 @@ export function setupLive(server: Server) {
           draining = false,
           sequence = 0,
           receivedSamples = 0;
-        let audioEpoch = 0;
+        let audioEpoch = 0,
+          streamStart = initial.timelineMs;
         const promptedSpeakers = new Set<string>();
         let writeChain = Promise.resolve();
         const pendingSegments = new Set<Promise<unknown>>();
@@ -75,24 +92,22 @@ export function setupLive(server: Server) {
           offset += pcm.length / 32;
           raw = [];
           bytes = 0;
-          const target = conversationId;
           writeChain = writeChain
             .then(async () => {
-              const c = await store.get<Conversation>(user.orgId, 'conversation', target);
-              if (!c) return;
-              const key = `${user.orgId}/recordings/${target}/${randomUUID()}.wav`;
+              const key = `${user.orgId}/recordings/${workId}/${randomUUID()}.wav`;
               await putFile(key, wav(pcm), 'audio/wav');
-              const saved = await store.mutateConversation(user.orgId, target, (v) => ({
-                ...v,
-                recordings: [...v.recordings, { key, startMs, endMs: startMs + pcm.length / 32 }],
-              }));
-              if (!saved) await deleteFile(key);
+              await saveSessionAudio(
+                user,
+                workId,
+                { key, startMs, endMs: startMs + pcm.length / 32 },
+                startMs + pcm.length / 32,
+              );
             })
             .catch(() =>
               send({
                 type: 'error',
                 scope: 'storage',
-                data: 'Не удалось сохранить часть аудиозаписи',
+                data: 'Не удалось сохранить аудио. Запись продолжается, в истории будет отмечен пропуск.',
               }),
             );
         };
@@ -112,9 +127,15 @@ export function setupLive(server: Server) {
           speech = null;
           draining = false;
           flush();
-          if (hadSpeech) send({ type: 'audio.status', data: { status: 'stopped' } });
+          if (hadSpeech)
+            void Promise.allSettled([writeChain, ...pendingSegments]).then(async () => {
+              await saveSessionAudio(user, workId, null, streamStart + receivedSamples / 16);
+              send({ type: 'audio.status', data: { status: 'stopped' } });
+            });
         };
         const onEvent = (event: AppEvent) => {
+          if (event.type === 'client.switched' && (event.data as any).session.id === workId)
+            conversationId = (event.data as any).conversation.id;
           send(event);
           if (
             event.type === 'conversation.updated' &&
@@ -150,8 +171,6 @@ export function setupLive(server: Server) {
                 receivedSamples,
               );
               const frame = Buffer.from(decoded);
-              sequence++;
-              receivedSamples += frame.length / 2;
               const second = Math.floor(Date.now() / 1000);
               if (second !== lastFrame) {
                 lastFrame = second;
@@ -161,6 +180,9 @@ export function setupLive(server: Server) {
               if (speech.bufferedAmount > 32000 * 3)
                 throw new Error('Обработка отстаёт. Запись приостановлена');
               speech.send(frame);
+              sequence++;
+              receivedSamples += frame.length / 2;
+              noteSessionTime(workId, streamStart + receivedSamples / 16);
               if (!enrolling && config.recordAudio) {
                 raw.push(frame);
                 bytes += frame.length;
@@ -215,13 +237,17 @@ export function setupLive(server: Server) {
             draining = false;
             sequence = 0;
             receivedSamples = 0;
-            offset = Math.max(
-              0,
-              ...current.recordings.map((r) => r.endMs),
-              ...current.segments.map((s) => s.endMs),
-            );
+            const work = await requireWorkSession(user, workId);
+            if (
+              requestEpoch !== audioEpoch ||
+              ws.readyState !== WebSocket.OPEN ||
+              work.status !== 'active'
+            )
+              return;
+            conversationId = work.activeId;
+            offset = Math.max(offset, work.timelineMs);
+            streamStart = offset;
             const sessionOffset = offset;
-            const targetId = conversationId;
             const upstream = new URL(config.speech);
             upstream.protocol = upstream.protocol === 'https:' ? 'wss:' : 'ws:';
             upstream.pathname = '/stream';
@@ -297,49 +323,47 @@ export function setupLive(server: Server) {
                     .parse(event);
                   parsed.startMs += sessionOffset;
                   parsed.endMs += sessionOffset;
-                  if (parsed.newSpeaker && parsed.role === 'unknown') {
-                    const active = await requireConversation(user, conversationId, true);
-                    if (
-                      active.card.ending &&
-                      parsed.confidence >= 0.85 &&
-                      (parsed.gapMs || 0) >= 2500 &&
-                      /здравств|добрый|подскажите/i.test(parsed.text)
-                    ) {
-                      stopAudio();
-                      const next = await createConversation(user, active.modelId);
-                      conversationId = next.id;
-                      await addSegment(user, next.id, {
-                        ...parsed,
-                        id: randomUUID(),
-                        role: 'customer',
-                        final: true,
-                        excluded: false,
-                        createdAt: new Date().toISOString(),
-                      });
-                      send({
-                        type: 'audio.status',
-                        data: {
-                          status: 'stopped',
-                          message: 'Начат новый разговор. Включите микрофон.',
-                        },
-                      });
-                      return;
-                    }
-                    if (!promptedSpeakers.has(parsed.speakerId)) {
-                      promptedSpeakers.add(parsed.speakerId);
-                      send({ type: 'session.boundary', conversationId, data: parsed });
-                    }
-                  }
-                  const saving = addSegment(user, targetId, {
-                    ...parsed,
-                    id: randomUUID(),
-                    final: true,
-                    excluded: !['customer', 'consultant'].includes(parsed.role),
-                    createdAt: new Date().toISOString(),
+                  const saving = store.withLock(sessionKey(user.orgId, workId), async () => {
+                    const work = await requireWorkSession(user, workId);
+                    conversationId = work.activeId;
+                    const history = (
+                      await store.list<Conversation>(user.orgId, 'conversation')
+                    ).filter((c) => (c.sessionId || c.id) === workId && !c.mergedInto);
+                    const destination = history.find(
+                      (c) =>
+                        !(c.status === 'completed' && c.audioEndMs === undefined) &&
+                        (c.audioStartMs ?? 0) <= parsed.startMs &&
+                        (c.audioEndMs ?? Infinity) > parsed.startMs,
+                    );
+                    // Final ASR results received after a switch belong to their original time range.
+                    const targetId = destination?.id || conversationId;
+                    return destination?.status === 'completed'
+                      ? store.mutateConversation(user.orgId, targetId, (v) => ({
+                          ...v,
+                          segments: [
+                            ...v.segments,
+                            {
+                              ...parsed,
+                              text: maskPII(parsed.text),
+                              id: randomUUID(),
+                              final: true,
+                              excluded: !['customer', 'consultant'].includes(parsed.role),
+                              createdAt: new Date().toISOString(),
+                            },
+                          ],
+                        }))
+                      : addSegment(user, targetId, {
+                          ...parsed,
+                          id: randomUUID(),
+                          final: true,
+                          excluded: !['customer', 'consultant'].includes(parsed.role),
+                          createdAt: new Date().toISOString(),
+                        });
                   });
                   pendingSegments.add(saving);
                   try {
                     await saving;
+                    void checkClientBoundary(user, workId).catch(() => {});
                   } finally {
                     pendingSegments.delete(saving);
                   }
@@ -367,9 +391,10 @@ export function setupLive(server: Server) {
               speech = null;
               draining = false;
               flush();
-              void Promise.allSettled([writeChain, ...pendingSegments]).then(() =>
-                send({ type: 'audio.status', data: { status: 'stopped' } }),
-              );
+              void Promise.allSettled([writeChain, ...pendingSegments]).then(async () => {
+                await saveSessionAudio(user, workId, null, streamStart + receivedSamples / 16);
+                send({ type: 'audio.status', data: { status: 'stopped' } });
+              });
             });
           } catch (e) {
             send({
@@ -386,6 +411,16 @@ export function setupLive(server: Server) {
           clearInterval(check);
           events.off(`${user.orgId}:${user.id}`, onEvent);
           stopAudio();
+          void writeChain
+            .finally(async () => {
+              try {
+                await saveSessionAudio(user, workId, null, streamStart + receivedSamples / 16);
+              } finally {
+                connections.delete(workId);
+                forgetSessionTime(workId);
+              }
+            })
+            .catch(() => {});
         });
         ws.on('error', () => ws.close());
       });

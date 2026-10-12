@@ -32,6 +32,56 @@ export class Store {
       if (this.locks.get(key) === job) this.locks.delete(key);
     }
   }
+  /** Atomic multi-record session transitions. Callers hold the session advisory lock. */
+  async sessionTransaction<T>(
+    org: string,
+    sessionId: string,
+    fn: (records: Map<string, any>, put: (kind: string, id: string, data: any) => void) => T,
+  ): Promise<T> {
+    const client = config.demo ? null : await pool!.connect();
+    try {
+      if (client) await client.query('BEGIN');
+      const records = new Map<string, any>();
+      if (client) {
+        const rows = await client.query(
+          "SELECT kind,id,data FROM app_record WHERE org_id=$1 AND (data->>'sessionId'=$2 OR (kind IN ('conversation','work-session') AND id=$2)) FOR UPDATE",
+          [org, sessionId],
+        );
+        for (const r of rows.rows) records.set(`${r.kind}:${r.id}`, r.data);
+      } else {
+        for (const [key, row] of this.memory) {
+          const data = row.data as any;
+          if (
+            key.startsWith(`${org}:`) &&
+            (data.sessionId === sessionId ||
+              key === `${org}:conversation:${sessionId}` ||
+              key === `${org}:work-session:${sessionId}`)
+          )
+            records.set(key.slice(org.length + 1), structuredClone(data));
+        }
+      }
+      const writes: { kind: string; id: string; data: any }[] = [];
+      const result = fn(records, (kind, id, data) => {
+        records.set(`${kind}:${id}`, data);
+        writes.push({ kind, id, data });
+      });
+      for (const w of writes) {
+        if (client)
+          await client.query(
+            'INSERT INTO app_record(org_id,kind,id,data) VALUES($1,$2,$3,$4) ON CONFLICT(org_id,kind,id) DO UPDATE SET data=EXCLUDED.data,version=app_record.version+1,updated_at=now()',
+            [org, w.kind, w.id, JSON.stringify(w.data)],
+          );
+        else await this.put(org, w.kind, w.id, w.data);
+      }
+      if (client) await client.query('COMMIT');
+      return result;
+    } catch (e) {
+      if (client) await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client?.release();
+    }
+  }
   async removeConversationRecords(org: string, id: string) {
     if (config.demo) {
       for (const [key, row] of this.memory)

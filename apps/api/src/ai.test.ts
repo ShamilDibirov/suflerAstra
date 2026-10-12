@@ -7,6 +7,7 @@ import {
   validateCoaching,
   testDecisionModel,
   inferSpeakerRoles,
+  inferBoundary,
 } from './ai';
 import { newConversation } from '@sufler/shared/engine';
 import { demoDocuments } from '@sufler/shared/demo';
@@ -160,6 +161,8 @@ it('generates prompt sales advice without retrieval, using selected model and ma
   expect(request.prompt).not.toContain('999');
   expect(fetchMock).not.toHaveBeenCalled();
   expect(validateCoaching('Тариф стоит 500 рублей.')).not.toContain('500');
+  expect(validateCoaching('Тариф стоит **500** **рублей**.')).not.toContain('500');
+  expect(validateCoaching('Это **бесплатно**.')).not.toContain('бесплатно');
 });
 
 it('offers general sales intents to Decision Model without knowledge documents', async () => {
@@ -224,4 +227,44 @@ it('infers semantic roles only for supplied speakers and accepts no low-confiden
   const request = JSON.parse(fetchMock.mock.calls[0][1].body);
   expect(request.questions.speaker_0.instructions).toContain('Номер спикера');
   expect(JSON.stringify(request)).not.toContain('123-45-67');
+});
+
+it('requires both boundary signals, ordered transcript anchors and 0.9 confidence', async () => {
+  const c = card();
+  c.segments = [0, 1, 2, 3].map((i) =>
+    SegmentSchema.parse({
+      id: `s${i}`,
+      text: ['Всё готово', 'До свидания', 'Здравствуйте, я следующий', 'Мне нужен телефон'][i],
+      role: 'customer',
+      confidence: 0.99,
+      startMs: i * 1000,
+      endMs: i * 1000 + 900,
+      createdAt: new Date().toISOString(),
+    }),
+  );
+  const answer = (
+    ended = 0.95,
+    began = 0.95,
+    first = 's2',
+    evidence = 's1',
+    confidence = 0.95,
+  ) => ({
+    answers: {
+      ended: { type: 'noul', noul: ended },
+      began: { type: 'noul', noul: began },
+      first: { type: 'choice', choice: first, confidence },
+      endEvidence: { type: 'choice', choice: evidence, confidence },
+    },
+  });
+  for (const [data, expected] of [
+    [answer(), 's2'],
+    [answer(0.89), null],
+    [answer(0.95, 0.7), null],
+    [answer(0.95, 0.95, 'invented'), null],
+    [answer(0.95, 0.95, 's1', 's2'), null],
+    [answer(0.95, 0.95, 's2', 's1', 0.85), null],
+  ] as const) {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(data)));
+    expect(await inferBoundary(c, new AbortController().signal)).toBe(expected);
+  }
 });

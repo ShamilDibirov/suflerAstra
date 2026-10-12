@@ -9,6 +9,7 @@ import {
   ConversationContent,
   ConversationScrollButton,
 } from './ai-elements/conversation';
+import { HintMarkdown } from './hint-markdown';
 import { Message, MessageContent, MessageResponse } from './ai-elements/message';
 import { Button } from './ui/button';
 type VerifiedMessage = UIMessage<unknown, { hint: Hint }>;
@@ -85,7 +86,7 @@ export function ChatPanel({
                   {m.parts
                     .filter((p) => p.type === 'text')
                     .map((p, i) => (
-                      <MessageResponse key={i}>{p.text}</MessageResponse>
+                      <HintMarkdown key={i}>{p.text}</HintMarkdown>
                     ))}
                   {hint && (
                     <div className="chat-sources">

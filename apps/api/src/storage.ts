@@ -48,3 +48,25 @@ export async function deleteFile(key: string) {
   }
   await s3.send(new DeleteObjectCommand({ Bucket: config.bucket, Key: key }));
 }
+
+/** Read only requested bytes; never materialize a whole consultation. */
+export async function* getFileRange(
+  key: string,
+  start: number,
+  end: number,
+  signal?: AbortSignal,
+): AsyncGenerator<Uint8Array> {
+  if (config.demo) {
+    const file = await getFile(key);
+    yield file.body.subarray(start, end + 1);
+    return;
+  }
+  const result = await s3.send(
+    new GetObjectCommand({ Bucket: config.bucket, Key: key, Range: `bytes=${start}-${end}` }),
+    { abortSignal: signal },
+  );
+  for await (const chunk of result.Body as AsyncIterable<Uint8Array>) {
+    if (signal?.aborted) return;
+    yield chunk;
+  }
+}

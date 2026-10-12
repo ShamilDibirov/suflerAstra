@@ -11,7 +11,8 @@
     "db:migrate": "tsx --env-file-if-exists=../../.env src/cli.ts migrate",
     "bootstrap": "tsx --env-file-if-exists=../../.env src/cli.ts bootstrap",
     "eval": "tsx --env-file-if-exists=../../.env src/cli.ts eval",
-    "check:providers": "tsx --env-file-if-exists=../../.env src/cli.ts check"
+    "check:providers": "tsx --env-file-if-exists=../../.env src/cli.ts check",
+    "eval:boundaries": "tsx --env-file-if-exists=../../.env src/eval-boundaries.ts"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "3.0.67",

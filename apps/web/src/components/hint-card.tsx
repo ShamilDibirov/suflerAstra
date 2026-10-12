@@ -9,6 +9,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import type { Hint } from '@sufler/shared';
+import { HintMarkdown } from './hint-markdown';
 import { Button } from './ui/button';
 export function HintCard({
   hint,
@@ -57,7 +58,9 @@ export function HintCard({
                   ? 'Есть подходящее предложение'
                   : 'Уточним, прежде чем советовать'}
           </h2>
-          <p className="hint-body">{hint.text}</p>
+          <div className="hint-body">
+            <HintMarkdown>{hint.text}</HintMarkdown>
+          </div>
           {hint.blocks.length > 0 && (
             <button className="hint-source" onClick={onSource}>
               <BookOpen size={13} />

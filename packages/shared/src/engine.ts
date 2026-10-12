@@ -175,7 +175,7 @@ export function renderHint(
       ? refs
           .map(
             (r) =>
-              r.quote +
+              `**Следующий шаг**\n\n${r.quote.replace(/([\\`*_{}\[\]<>])/g, '\\$1')}` +
               (r.catalogDate ? `\nКаталог от ${r.catalogDate}. Наличие требует проверки.` : ''),
           )
           .join('\n\n')

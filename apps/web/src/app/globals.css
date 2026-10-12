@@ -2166,3 +2166,147 @@ kbd {
     flex-wrap: wrap;
   }
 }
+
+.hint-markdown {
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.hint-markdown p {
+  margin: 0 0 0.65em;
+}
+.hint-markdown p:last-child {
+  margin-bottom: 0;
+}
+.hint-markdown strong {
+  font-weight: 750;
+  color: var(--foreground, #30283f);
+}
+.hint-markdown ul,
+.hint-markdown ol {
+  padding-left: 1.3em;
+  margin: 0.4em 0;
+}
+.hint-markdown blockquote {
+  border-left: 3px solid #9d7de5;
+  margin: 0.7em 0;
+  padding: 0.2em 0.8em;
+  background: #f8f5ff;
+  border-radius: 0 8px 8px 0;
+}
+.client-switch-toast {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  max-width: calc(100vw - 32px);
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 16px;
+  border: 1px solid #d9cbed;
+  border-radius: 14px;
+  background: white;
+  box-shadow: 0 6px 30px #38285822;
+}
+.playback-tools,
+.metrics-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: end;
+  margin: 14px 0;
+}
+.playback-tools label,
+.metrics-filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  min-width: 0;
+}
+.metrics-filters input,
+.metrics-filters select {
+  max-width: 230px;
+  width: 100%;
+}
+.playback-transcript {
+  max-height: 440px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  margin: 16px 0;
+}
+.playback-turn {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 14px;
+  border: 0;
+  border-left: 3px solid transparent;
+  background: transparent;
+  border-radius: 8px;
+  color: inherit;
+  cursor: pointer;
+}
+.playback-turn small {
+  display: block;
+  color: #81798d;
+  margin-bottom: 6px;
+}
+.playback-turn span {
+  display: block;
+  line-height: 1.55;
+}
+.playback-turn.playing {
+  border-left-color: #8357d8;
+  background: #f0e8ff;
+}
+.playback-turn:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+.metrics-panel,
+.tariff-editor {
+  padding: 20px;
+  margin-bottom: 22px;
+}
+.cost-breakdowns details {
+  border-top: 1px solid #eee8f4;
+  padding: 12px 0;
+}
+.cost-breakdowns summary,
+.tariff-editor summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+@media (max-width: 640px) {
+  .metrics-filters label {
+    flex: 1 1 130px;
+  }
+  .client-switch-toast {
+    bottom: 12px;
+    right: 12px;
+    left: 12px;
+  }
+  .playback-tools {
+    align-items: center;
+  }
+}
+
+.workspace-more {
+  position: relative;
+}
+.workspace-more summary {
+  cursor: pointer;
+  padding: 9px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.workspace-more[open] > button {
+  position: absolute;
+  right: 0;
+  top: 44px;
+  z-index: 20;
+  white-space: nowrap;
+  background: white;
+  box-shadow: 0 8px 24px #1a10351a;
+}

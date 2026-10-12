@@ -16,6 +16,8 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import type { Request, Response } from 'express';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { createUIMessageStream, createUIMessageStreamResponse } from 'ai';
@@ -30,6 +32,15 @@ import {
   type ModelCallLog,
 } from '@sufler/shared';
 import { audioRange } from './audio-range';
+import { audioLayout, audioBytes } from './unified-audio';
+import {
+  ensureSession,
+  requireWorkSession,
+  switchClient,
+  undoClientSwitch,
+  finishWorkingSession,
+} from './working-sessions';
+import { saveTariff, summarize } from './billing';
 import { config } from './config';
 import { getPrompts, savePrompts } from './prompts';
 import { DEFAULT_PROMPTS } from '@sufler/shared';
@@ -48,12 +59,164 @@ import {
 } from './conversations';
 import { saveDocument, publishDocument, addSalesTemplates } from './knowledge';
 import { draftProcess, testModel, testDecisionModel, providerError } from './ai';
-import { putFile, getFile } from './storage';
+import { putFile } from './storage';
 import { enqueueIngest, deleteConversation } from './infra';
 import { fromNodeHeaders } from 'better-auth/node';
 
 @Controller('api')
 export class ApiController {
+  @Get('sessions/:id') async workSession(@Req() req: Request, @Param('id') id: string) {
+    const user = await session(req);
+    const c = await requireConversation(user, id, true);
+    return ensureSession(user, c);
+  }
+  @Post('sessions/:id/finish') async finishWork(@Req() req: Request, @Param('id') id: string) {
+    return finishWorkingSession(await session(req), id);
+  }
+  @Post('sessions/:id/next') async nextClient(@Req() req: Request, @Param('id') id: string) {
+    const user = await session(req);
+    await requireWorkSession(user, id);
+    return switchClient(user, id);
+  }
+  @Post('sessions/:id/undo') async undoClient(
+    @Req() req: Request,
+    @Param('id') id: string,
+    @Body() body: unknown,
+  ) {
+    return undoClientSwitch(
+      await session(req),
+      id,
+      z.object({ boundaryId: z.string() }).parse(body).boundaryId,
+    );
+  }
+  @Get('admin/tariffs') async tariffs(@Req() req: Request) {
+    const u = await session(req);
+    assertAdmin(u);
+    return store.list(u.orgId, 'tariff');
+  }
+  @Post('admin/tariffs') async tariff(@Req() req: Request, @Body() body: unknown) {
+    const u = await session(req);
+    assertAdmin(u);
+    try {
+      return await saveTariff(u.orgId, body);
+    } catch (e) {
+      throw new BadRequestException(e instanceof Error ? e.message : 'Некорректный тариф');
+    }
+  }
+  @Get('admin/metrics') async metrics(@Req() req: Request) {
+    const u = await session(req);
+    assertAdmin(u);
+    const q = z
+      .object({
+        from: z
+          .string()
+          .regex(/^\d{4}-\d{2}-\d{2}$/)
+          .optional(),
+        to: z
+          .string()
+          .regex(/^\d{4}-\d{2}-\d{2}$/)
+          .optional(),
+        model: z.string().optional(),
+        type: z.string().optional(),
+        user: z.string().optional(),
+      })
+      .parse(req.query);
+    const today = new Date(Date.now() + 3 * 3600000).toISOString().slice(0, 10),
+      from = q.from || new Date(Date.now() + 3 * 3600000 - 6 * 86400000).toISOString().slice(0, 10),
+      to = q.to || today;
+    const start = Date.parse(`${from}T00:00:00+03:00`),
+      end = Date.parse(`${to}T00:00:00+03:00`) + 86400000;
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start)
+      throw new BadRequestException('Некорректный период');
+    const all = await store.list<ModelCallLog>(u.orgId, 'model-call');
+    const calls = all.filter(
+      (c) =>
+        Date.parse(c.at) >= start &&
+        Date.parse(c.at) < end &&
+        (!q.model || c.model === q.model) &&
+        (!q.type || c.type === q.type) &&
+        (!q.user || c.userId === q.user),
+    );
+    const ids = new Set(calls.map((c) => c.conversationId));
+    const conversations = (await store.list<Conversation>(u.orgId, 'conversation'))
+      .filter(
+        (c) =>
+          !c.mergedInto &&
+          (!q.user || c.userId === q.user) &&
+          (ids.has(c.id) ||
+            (!q.model &&
+              !q.type &&
+              Date.parse(c.createdAt) >= start &&
+              Date.parse(c.createdAt) < end)),
+      )
+      .map((c) => ({
+        ...c,
+        hints: c.hints.filter(
+          (h) =>
+            Date.parse(h.createdAt) >= start &&
+            Date.parse(h.createdAt) < end &&
+            (!q.model || h.modelId === q.model),
+        ),
+      }));
+    return {
+      ...summarize(calls, conversations),
+      from,
+      to,
+      retentionDays: config.retentionDays,
+      models: [...new Set(all.map((c) => c.model))],
+      types: [...new Set(all.map((c) => c.type))],
+      users: [...new Set(all.flatMap((c) => (c.userId ? [c.userId] : [])))],
+      userNames: Object.fromEntries(
+        (await this.users(req)).map((v: { id: string; name: string }) => [v.id, v.name]),
+      ),
+    };
+  }
+  @Get('conversations/:id/audio') async unifiedAudio(
+    @Req() req: Request,
+    @Res() res: Response,
+    @Param('id') id: string,
+  ) {
+    const c = await requireConversation(await session(req), id);
+    if (!c.recordings.length) throw new NotFoundException('Запись отсутствует');
+    return this.streamRecording(req, res, c.recordings, c.id);
+  }
+  private async streamRecording(
+    req: Request,
+    res: Response,
+    recordings: Conversation['recordings'],
+    id: string,
+  ) {
+    const layout = audioLayout(recordings),
+      range = req.headers.range
+        ? audioRange(req.headers.range, layout.length)
+        : { start: 0, end: layout.length - 1 };
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.type('audio/wav');
+    if (!range) {
+      res.setHeader('Content-Range', `bytes */${layout.length}`);
+      res.status(416).end();
+      return;
+    }
+    if (req.headers.range) {
+      res.status(206);
+      res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${layout.length}`);
+    }
+    res.setHeader('Content-Length', range.end - range.start + 1);
+    if (req.query.download === '1')
+      res.setHeader('Content-Disposition', `attachment; filename="dialog-${id}.wav"`);
+    const abort = new AbortController();
+    res.on('close', () => abort.abort());
+    try {
+      await pipeline(
+        Readable.from(audioBytes(recordings, range.start, range.end, abort.signal)),
+        res,
+      );
+    } catch (e) {
+      if (!abort.signal.aborted) res.destroy(e as Error);
+    }
+  }
+
   @Get('admin/prompts') async prompts(@Req() req: Request) {
     const user = await session(req);
     assertAdmin(user);
@@ -118,7 +281,7 @@ export class ApiController {
   @Get('conversations') async conversationList(@Req() req: Request) {
     const user = await session(req);
     return (await store.list<Conversation>(user.orgId, 'conversation'))
-      .filter((c) => c.userId === user.id)
+      .filter((c) => c.userId === user.id && !c.mergedInto)
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
   @Post('conversations') async create(@Req() req: Request, @Body() body: unknown) {
@@ -256,11 +419,12 @@ export class ApiController {
   @Get('admin/overview') async overview(@Req() req: Request) {
     const user = await session(req);
     assertAdmin(user);
-    const [docs, conversations, usage] = await Promise.all([
+    const [docs, allConversations, usage] = await Promise.all([
       store.list<KnowledgeDocument>(user.orgId, 'document'),
       store.list<Conversation>(user.orgId, 'conversation'),
-      store.list<{ inputTokens: number; outputTokens: number }>(user.orgId, 'usage'),
+      store.list<ModelCallLog>(user.orgId, 'model-call'),
     ]);
+    const conversations = allConversations.filter((c) => !c.mergedInto);
     const hints = conversations.flatMap((c) => c.hints);
     return {
       documents: docs.length,
@@ -272,9 +436,7 @@ export class ApiController {
       avgLatency: hints.length
         ? Math.round(hints.reduce((s, h) => s + h.latencyMs, 0) / hints.length)
         : 0,
-      tokens:
-        usage.reduce((s, u) => s + (u.inputTokens || 0) + (u.outputTokens || 0), 0) +
-        hints.reduce((s, h) => s + h.inputTokens + h.outputTokens, 0),
+      tokens: usage.reduce((s, u) => s + (u.inputTokens || 0) + (u.outputTokens || 0), 0),
       demo: config.demo,
     };
   }
@@ -427,9 +589,9 @@ export class ApiController {
   @Get('admin/history') async history(@Req() req: Request) {
     const user = await session(req);
     assertAdmin(user);
-    return (await store.list<Conversation>(user.orgId, 'conversation')).sort((a, b) =>
-      b.createdAt.localeCompare(a.createdAt),
-    );
+    return (await store.list<Conversation>(user.orgId, 'conversation'))
+      .filter((c) => !c.mergedInto)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
   @Get('admin/history/:id/analytics') async analytics(
     @Req() req: Request,
@@ -444,6 +606,7 @@ export class ApiController {
     return {
       conversation,
       calls,
+      summary: summarize(calls, [conversation]),
       recordingEnabled: config.recordAudio,
       retentionDays: config.retentionDays,
     };
@@ -457,20 +620,7 @@ export class ApiController {
     const c = await requireConversation(await session(req), id);
     const audio = c.recordings[Number(index)];
     if (!audio) throw new NotFoundException();
-    const file = await getFile(audio.key);
-    res.setHeader('Cache-Control', 'private, no-store');
-    res.setHeader('Accept-Ranges', 'bytes');
-    res.type(file.type);
-    if (req.headers.range) {
-      const range = audioRange(req.headers.range, file.body.length);
-      if (!range) {
-        res.setHeader('Content-Range', `bytes */${file.body.length}`);
-        res.status(416).end();
-        return;
-      }
-      res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${file.body.length}`);
-      res.status(206).send(file.body.subarray(range.start, range.end + 1));
-    } else res.send(file.body);
+    return this.streamRecording(req, res, [audio], c.id);
   }
   @Get('admin/users') async users(@Req() req: Request) {
     const user = await session(req);

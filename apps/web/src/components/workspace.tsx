@@ -1,4 +1,5 @@
 'use client';
+import { acceptConversation } from '@/lib/conversation-state';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -81,8 +82,10 @@ export function Workspace() {
     [editRole, setEditRole] = useState<TranscriptSegment['role']>('customer');
   const [pip, setPip] = useState<Window | null>(null),
     [partial, setPartial] = useState(''),
+    [switched, setSwitched] = useState<import('@sufler/shared').ClientBoundary | null>(null),
     [boundary, setBoundary] = useState<{ text: string; speakerId: string } | null>(null),
     [contextStatus, setContextStatus] = useState(''),
+    [contextPending, setContextPending] = useState(false),
     [editingCard, setEditingCard] = useState(false),
     [cardIntent, setCardIntent] = useState(''),
     [cardLabel, setCardLabel] = useState(''),
@@ -96,6 +99,20 @@ export function Workspace() {
   }, []);
   const onEvent = useCallback(
     (event: AppEvent) => {
+      if (event.type === 'client.switched') {
+        const data = event.data as {
+          conversation: Conversation;
+          boundary: import('@sufler/shared').ClientBoundary;
+        };
+        conversationRef.current = data.conversation;
+        setConversation(data.conversation);
+        setPartial('');
+        setBoundary(null);
+        setContextStatus('');
+        setContextPending(false);
+        setChat(false);
+        setSwitched(data.boundary.status === 'applied' ? data.boundary : null);
+      }
       if (event.type === 'conversation.updated') {
         const c = event.data as Conversation;
         const current = conversationRef.current;
@@ -111,10 +128,8 @@ export function Workspace() {
               ? null
               : current,
           );
-          conversationRef.current = c;
-          setConversation((prev) =>
-            !prev || prev.id !== c.id || c.card.revision >= prev.card.revision ? c : prev,
-          );
+          conversationRef.current = acceptConversation(current, c);
+          setConversation((prev) => acceptConversation(prev, c));
         }
       }
       if (event.type === 'transcript.partial') setPartial((event.data as { text: string }).text);
@@ -124,8 +139,10 @@ export function Workspace() {
             ? current
             : (event.data as { text: string; speakerId: string }),
         );
-      if (event.type === 'context.status' && event.conversationId === conversationRef.current?.id)
+      if (event.type === 'context.status' && event.conversationId === conversationRef.current?.id) {
         setContextStatus((event.data as { message: string }).message);
+        setContextPending(Boolean((event.data as { pending?: boolean }).pending));
+      }
       if (event.type === 'error') {
         audioError.current = event.scope === 'audio' ? String(event.data) : null;
         setError(String(event.data));
@@ -144,7 +161,15 @@ export function Workspace() {
     },
     [notify],
   );
-  const audio = useAudio(conversation?.id, onEvent);
+  const audio = useAudio(conversation?.sessionId || conversation?.id, onEvent);
+  useEffect(() => {
+    if (!switched) return;
+    const t = setTimeout(
+      () => setSwitched(null),
+      Math.max(0, Date.parse(switched.undoUntil) - Date.now()),
+    );
+    return () => clearTimeout(t);
+  }, [switched]);
   useEffect(() => {
     if (!user) return;
     Promise.all([
@@ -163,6 +188,11 @@ export function Workspace() {
         setModels(list);
         setDocs(knowledge);
         const active = history.find((c) => c.status === 'active');
+        if (active) {
+          const ws = await api<import('@sufler/shared').WorkingSession>(`/sessions/${active.id}`);
+          const b = ws.boundaries.at(-1);
+          if (b?.status === 'applied' && Date.parse(b.undoUntil) > Date.now()) setSwitched(b);
+        }
         setConversation(active || null);
       })
       .catch((e) => setError(e.message))
@@ -175,9 +205,7 @@ export function Workspace() {
       () =>
         api<Conversation>(`/conversations/${id}`)
           .then((c) =>
-            setConversation((prev) =>
-              prev?.id === id && c.card.revision >= prev.card.revision ? c : prev,
-            ),
+            setConversation((prev) => (prev?.id === id ? acceptConversation(prev, c) : prev)),
           )
           .catch(() => {}),
       3500,
@@ -186,8 +214,11 @@ export function Workspace() {
   }, [conversation?.id]);
   useEffect(() => () => pip?.close(), [pip]);
   async function refresh() {
-    if (conversationRef.current)
-      setConversation(await api<Conversation>(`/conversations/${conversationRef.current.id}`));
+    const id = conversationRef.current?.id;
+    if (id) {
+      const fresh = await api<Conversation>(`/conversations/${id}`);
+      setConversation((prev) => (prev?.id === id ? acceptConversation(prev, fresh) : prev));
+    }
   }
   async function run(action: () => Promise<unknown>) {
     setError('');
@@ -201,13 +232,26 @@ export function Workspace() {
     }
   }
   async function newClient() {
+    if (conversation?.status === 'active') {
+      const result = await post<{
+        conversation: Conversation;
+        boundary: import('@sufler/shared').ClientBoundary;
+      } | null>(`/sessions/${conversation.sessionId || conversation.id}/next`);
+      if (!result) throw new Error('Дождитесь завершения предыдущей смены клиента');
+      conversationRef.current = result.conversation;
+      setConversation(result.conversation);
+      setSwitched(result.boundary);
+      setPartial('');
+      setChat(false);
+      return;
+    }
     await audio.stopAndWait();
     setPartial('');
     setBoundary(null);
     setContextStatus('');
+    setContextPending(false);
     const created = await post<Conversation>('/conversations', {
       modelId: conversation?.modelId,
-      previousId: conversation?.status === 'active' ? conversation.id : undefined,
     });
     const mode = conversation?.assistanceMode;
     setConversation(
@@ -299,7 +343,8 @@ export function Workspace() {
   }
   async function endSession() {
     await audio.stopAndWait();
-    if (conversation) await post(`/conversations/${conversation.id}/finish`);
+    const current = conversationRef.current;
+    if (current) await post(`/sessions/${current.sessionId || current.id}/finish`);
     pip?.close();
     setPip(null);
     setConversation(null);
@@ -307,11 +352,14 @@ export function Workspace() {
     setPartial('');
     setBoundary(null);
     setContextStatus('');
+    setContextPending(false);
     setChat(false);
     setText('');
     setSettings(false);
   }
-  const currentHint = conversation?.hints.filter((h) => h.status === 'current').at(-1);
+  const currentHint =
+    conversation?.hints.filter((h) => h.status === 'current').at(-1) ||
+    ((busy || contextPending) && !conversation?.error ? conversation?.hints.at(-1) : undefined);
   const currentDoc = docs.find((d) => d.id === currentHint?.blocks[0]?.documentId);
   const upcoming = currentDoc?.blocks.find(
     (b) =>
@@ -339,7 +387,7 @@ export function Workspace() {
             : 'Начните разговор и нажмите «Подскажи», когда понадобится совет.'
           : undefined)
       }
-      busy={busy}
+      busy={busy || contextPending}
       auto={conversation?.autoHints}
       onHint={() => void hint()}
       onChat={() => {
@@ -378,6 +426,28 @@ export function Workspace() {
 
   return (
     <Shell user={user}>
+      {switched && (
+        <div className="client-switch-toast" role="status">
+          <span>Начат диалог с {conversation.card.label}</span>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() =>
+              void run(async () => {
+                const result = await post<{ conversation: Conversation }>(
+                  `/sessions/${conversation.sessionId || conversation.id}/undo`,
+                  { boundaryId: switched.id },
+                );
+                conversationRef.current = result.conversation;
+                setConversation(result.conversation);
+                setSwitched(null);
+              })
+            }
+          >
+            Отменить
+          </Button>
+        </div>
+      )}
       <div className="page-heading workspace-heading">
         <div>
           <h1>Диалог с клиентом</h1>
@@ -419,10 +489,12 @@ export function Workspace() {
             <PanelTop size={15} />
             Поверх окон
           </Button>
-          <Button variant="outline" onClick={() => void run(newClient)} disabled={busy}>
-            <Plus size={15} />
-            Новый клиент
-          </Button>
+          <details className="workspace-more">
+            <summary>Ещё</summary>
+            <Button variant="outline" onClick={() => void run(newClient)} disabled={busy}>
+              <Plus size={15} /> Новый клиент
+            </Button>
+          </details>
         </div>
       </div>
       {!zen && (conversation?.assistanceMode || runtime.defaultAssistanceMode) === 'scripts' && (
@@ -641,7 +713,7 @@ export function Workspace() {
                 </span>
               </div>
             </div>
-            {boundary && (
+            {boundary && !zen && (
               <section
                 className="panel speaker-notice"
                 aria-label="Назначить новый голос"
@@ -930,7 +1002,7 @@ export function Workspace() {
       </div>
       <div className="privacy-note">
         <ShieldCheck size={11} />
-        Данные доступны только вашей организации · Хранятся 30 дней
+        Данные доступны только вашей организации
       </div>
       <Dialog
         open={chat}

@@ -34,6 +34,8 @@ import { useSession } from '@/hooks/use-session';
 import { Shell, LoadingScreen } from './shell';
 import { Button } from './ui/button';
 import { Dialog } from './ui/dialog';
+import { HintMarkdown } from './hint-markdown';
+import { MetricsPanel, TariffEditor } from './metrics-panel';
 import { HistoryAnalytics } from './history-analytics';
 import { PromptEditor } from './prompt-editor';
 type Overview = {
@@ -298,7 +300,11 @@ export function Admin({ section }: { section: string }) {
         </div>
       )}
       {section === 'prompts' && <PromptEditor key={user.orgId} />}
+      {section === 'models' && <TariffEditor />}
       {(section === 'overview' || section === 'metrics') && (
+        <MetricsPanel compact={section === 'overview'} />
+      )}
+      {section === 'overview' && (
         <>
           <div className="stat-grid">
             {[
@@ -386,40 +392,6 @@ export function Admin({ section }: { section: string }) {
               </div>
             </section>
           </div>
-          {section === 'metrics' && (
-            <section className="panel" style={{ marginTop: 22 }}>
-              <div className="panel-header">
-                <h3>Наблюдаемые показатели</h3>
-                <span className="tag gray">Без содержимого диалогов в логах</span>
-              </div>
-              <div className="metric-line">
-                <span>Вход + выход</span>
-                <strong>{overview?.tokens || 0} токенов</strong>
-              </div>
-              <div className="metric-line">
-                <span>С источником</span>
-                <div className="metric-bar">
-                  <i
-                    style={{
-                      width: `${overview?.hints ? (overview.grounded / overview.hints) * 100 : 0}%`,
-                    }}
-                  />
-                </div>
-                <strong>
-                  {overview?.hints ? Math.round((overview.grounded / overview.hints) * 100) : 0}%
-                </strong>
-              </div>
-              <div className="metric-line">
-                <span>Хранение</span>
-                <strong>30 дней</strong>
-              </div>
-              <div className="info-banner" style={{ margin: 22 }}>
-                {user.demo
-                  ? 'Демо не измеряет реальную задержку и стоимость. Для замеров подключите провайдеров.'
-                  : 'Цель пилота: p95 до 6 секунд. Подтверждается нагрузочным тестом с реальными провайдерами.'}
-              </div>
-            </section>
-          )}
         </>
       )}
       {isDocs && (
@@ -707,7 +679,7 @@ export function Admin({ section }: { section: string }) {
         <section className="panel">
           <div className="table-toolbar">
             <h3>Консультации</h3>
-            <small>Аудио и текст хранятся 30 дней</small>
+            <small>Срок хранения задан администратором сервера</small>
           </div>
           <div className="table-wrap">
             <table className="data-table">
@@ -732,7 +704,7 @@ export function Admin({ section }: { section: string }) {
                     </td>
                     <td>{directionLabels[c.card.direction]}</td>
                     <td>{c.segments.length}</td>
-                    <td>{c.modelId.split('/')[1]}</td>
+                    <td>{c.modelId.split('/').at(-1)}</td>
                     <td>
                       <span className={`tag ${c.status === 'active' ? 'green' : 'gray'}`}>
                         {c.status === 'active' ? 'В процессе' : 'Завершён'}
@@ -1083,27 +1055,13 @@ export function Admin({ section }: { section: string }) {
       >
         <div className="history-detail">
           {detail && <HistoryAnalytics key={detail.id} initial={detail} />}
-          {detail?.segments.map((s) => (
-            <div key={s.id} className="transcript-row">
-              <span className="speaker-avatar">
-                <Users size={12} />
-              </span>
-              <div className="speech-content">
-                <div className="speech-meta">
-                  <strong>{roleLabels[s.role]}</strong>
-                  <time>{formatTime(s.createdAt)}</time>
-                </div>
-                <p>{s.text}</p>
-              </div>
-            </div>
-          ))}
           {detail?.hints.map((h) => (
             <div className="source-quote" key={h.id}>
               <small>
                 Подсказка · {h.modelId} · {h.inputTokens + h.outputTokens} токенов ·{' '}
                 {(h.latencyMs / 1000).toFixed(2)} с · {h.status}
               </small>
-              <p>{h.text}</p>
+              <HintMarkdown>{h.text}</HintMarkdown>
             </div>
           ))}
         </div>

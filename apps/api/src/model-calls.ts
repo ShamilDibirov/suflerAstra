@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import type { ModelCallLog, Conversation } from '@sufler/shared';
 import { store } from './store';
+import { tariffAt, usageOf, estimateCost } from './billing';
 
 const context = new AsyncLocalStorage<{ c: Conversation; type: string }>();
 export function withModelCall<T>(c: Conversation, type: string, fn: () => Promise<T>) {
@@ -11,7 +12,7 @@ export function withModelCall<T>(c: Conversation, type: string, fn: () => Promis
 export const modelFetch: typeof fetch = async (input, init) => {
   const active = context.getStore();
   if (!active) return fetch(input, init);
-  const start = Date.now();
+  let start = Date.now();
   const body = JSON.parse(typeof init?.body === 'string' ? init.body : '{}');
   const log: ModelCallLog = {
     id: randomUUID(),
@@ -22,11 +23,18 @@ export const modelFetch: typeof fetch = async (input, init) => {
     at: new Date().toISOString(),
     latencyMs: 0,
     status: 'error',
-    inputTokens: 0,
-    outputTokens: 0,
-    reasoningTokens: 0,
+    inputTokens: null,
+    outputTokens: null,
+    reasoningTokens: null,
+    cachedTokens: null,
+    costUsd: null,
+    costSource: 'unknown',
+    userId: active.c.userId,
+    sessionId: active.c.sessionId || active.c.id,
     reasoning: body.model === 'decision-model-preview' ? 'decision' : 'disabled',
   };
+  log.tariff = await tariffAt(active.c.orgId, log.model, log.at).catch(() => null);
+  start = Date.now();
   try {
     const response = await fetch(input, init);
     log.httpStatus = response.status;
@@ -35,13 +43,9 @@ export const modelFetch: typeof fetch = async (input, init) => {
       .clone()
       .json()
       .catch(() => ({}));
-    const usage = data.usage || {};
-    log.inputTokens = usage.prompt_tokens ?? usage.input_tokens ?? 0;
-    log.outputTokens = usage.completion_tokens ?? usage.output_tokens ?? 0;
-    log.reasoningTokens =
-      usage.completion_tokens_details?.reasoning_tokens ??
-      usage.output_tokens_details?.reasoning_tokens ??
-      0;
+    Object.assign(log, usageOf(data));
+    log.costUsd = estimateCost(usageOf(data), log.tariff || null);
+    log.costSource = log.costUsd === null ? 'unknown' : 'estimated';
     log.requestId = data.request_id || response.headers.get('x-request-id') || undefined;
     log.result = data.answers
       ? JSON.stringify(data.answers).slice(0, 6000)
@@ -58,6 +62,17 @@ export const modelFetch: typeof fetch = async (input, init) => {
   } finally {
     log.latencyMs = Date.now() - start;
     // Telemetry must never interrupt the speech / hint flow.
-    await store.put(active.c.orgId, 'model-call', log.id, log).catch(() => {});
+    await store
+      .withLock(`work-session:${active.c.orgId}:${active.c.sessionId || active.c.id}`, async () => {
+        const current = await store.get<Conversation>(
+          active.c.orgId,
+          'conversation',
+          log.conversationId,
+        );
+        if (!current) return;
+        if (current.mergedInto) log.conversationId = current.mergedInto;
+        await store.put(active.c.orgId, 'model-call', log.id, log);
+      })
+      .catch(() => {});
   }
 };

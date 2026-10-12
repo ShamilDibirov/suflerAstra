@@ -8,6 +8,17 @@ afterEach(() => vi.unstubAllGlobals());
 it('captures model latency, actual usage and failure without storing credentials or prompts; deletes with dialogue', async () => {
   const c = newConversation(randomUUID(), 'u', 'qwen3.8-flash', 'Client');
   const otherOrg = randomUUID();
+  await store.put(c.orgId, 'conversation', c.id, c);
+  await store.put(c.orgId, 'tariff', 'initial', {
+    id: 'initial',
+    modelId: c.modelId,
+    input: 2,
+    output: 6,
+    cached: 1,
+    effectiveAt: '2026-01-01T00:00:00.000Z',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    currency: 'USD',
+  });
   vi.stubGlobal(
     'fetch',
     vi
@@ -41,6 +52,9 @@ it('captures model latency, actual usage and failure without storing credentials
     outputTokens: 15,
     reasoningTokens: 0,
   });
+  expect(logs[0].costUsd).toBeCloseTo(0.00019);
+  expect(logs[0].tariff?.input).toBe(2);
+  expect(logs[1].costUsd).toBeNull();
   expect(logs[1]).toMatchObject({ status: 'error', httpStatus: 403 });
   expect(logs.every((x) => x.latencyMs >= 0)).toBe(true);
   expect(JSON.stringify(logs)).not.toContain('secret-token');

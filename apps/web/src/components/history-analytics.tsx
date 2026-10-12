@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react';
 import type { Conversation, ModelCallLog } from '@sufler/shared';
 import { api, formatTime } from '@/lib/api';
+import { CostSummary, CostBreakdown, dollars, callNames, type Metrics } from './metrics-panel';
 import { RecordingPlayer } from './recording-player';
 
 const names: Record<string, string> = {
@@ -15,6 +16,7 @@ export function HistoryAnalytics({ initial }: { initial: Conversation }) {
   const [data, setData] = useState<{
     conversation: Conversation;
     calls: ModelCallLog[];
+    summary: Metrics;
     recordingEnabled: boolean;
     retentionDays: number;
   } | null>(null);
@@ -24,7 +26,10 @@ export function HistoryAnalytics({ initial }: { initial: Conversation }) {
     const refresh = () =>
       api<NonNullable<typeof data>>(`/admin/history/${initial.id}/analytics`)
         .then((value) => {
-          if (active) setData(value);
+          if (active) {
+            setData(value);
+            setError('');
+          }
         })
         .catch((e) => {
           if (active) setError(e.message);
@@ -55,46 +60,12 @@ export function HistoryAnalytics({ initial }: { initial: Conversation }) {
           {data.recordingEnabled ? 'включена' : 'выключена'}
         </p>
       )}
-      <div className="call-stats">
-        <div>
-          <small>Вызовы</small>
-          <strong>{calls.length}</strong>
-        </div>
-        <div>
-          <small>Ошибки / отмены</small>
-          <strong>
-            {calls.filter((x) => x.status === 'error').length} /{' '}
-            {calls.filter((x) => x.status === 'cancelled').length}
-          </strong>
-        </div>
-        <div>
-          <small>Latency p50 / p95</small>
-          <strong>
-            {percentile(0.5)} / {percentile(0.95)}
-          </strong>
-        </div>
-        <div>
-          <small>Вход / выход, токены</small>
-          <strong>
-            {calls.reduce((n, x) => n + x.inputTokens, 0)} /{' '}
-            {calls.reduce((n, x) => n + x.outputTokens, 0)}
-          </strong>
-        </div>
-        <div>
-          <small>Reasoning, токены</small>
-          <strong>{calls.reduce((n, x) => n + x.reasoningTokens, 0)}</strong>
-        </div>
-        <div>
-          <small>Реплики / подсказки</small>
-          <strong>
-            {c.segments.length} / {c.hints.length}
-          </strong>
-        </div>
-      </div>
-      <p className="muted">
-        Latency — полный HTTP-запрос модели, включая получение ответа. Это не время от окончания
-        речи. Токены — по данным провайдера; стоимость здесь не рассчитывается.
-      </p>
+      {data && (
+        <>
+          <CostSummary value={data.summary} />
+          <CostBreakdown value={data.summary} />
+        </>
+      )}
       {error && <p role="alert">{error}</p>}
       <details>
         <summary>Контекст и роли спикеров · ревизия {c.card.revision}</summary>
@@ -116,7 +87,7 @@ export function HistoryAnalytics({ initial }: { initial: Conversation }) {
         <details key={call.id} className="call-log">
           <summary>
             <time>{formatTime(call.at)}</time>
-            <strong>{names[call.type] || call.type}</strong>
+            <strong>{callNames[call.type] || call.type}</strong>
             <span>{call.model}</span>
             <span>{(call.latencyMs / 1000).toFixed(2)} с</span>
             <span>
@@ -124,8 +95,15 @@ export function HistoryAnalytics({ initial }: { initial: Conversation }) {
             </span>
           </summary>
           <p className="muted">
-            {call.inputTokens} вход / {call.outputTokens} выход · reasoning {call.reasoningTokens} ·
-            ревизия {call.revision}
+            {call.inputTokens ?? '—'} вход / {call.outputTokens ?? '—'} выход · кэш{' '}
+            {call.cachedTokens ?? '—'} · reasoning {call.reasoningTokens ?? '—'} ·{' '}
+            {dollars(call.costUsd)} (
+            {call.costSource === 'estimated'
+              ? 'расчёт'
+              : call.costSource === 'provider'
+                ? 'провайдер'
+                : 'стоимость неизвестна'}
+            ) · ревизия {call.revision}
           </p>
           {call.requestId && <small>Request ID: {call.requestId}</small>}
           {call.error && <p>{call.error}</p>}

@@ -27,6 +27,7 @@ import { retrieve, scriptSources } from './knowledge';
 import { redis } from './infra';
 import { config } from './config';
 import { getPrompts } from './prompts';
+import { ensureSession, sessionKey, finishWorkingSession } from './working-sessions';
 
 const autoTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const roleJobs = new Map<string, AbortController>();
@@ -84,6 +85,14 @@ export function cancel(id: string) {
   generators.delete(id);
 }
 export async function createConversation(user: SessionUser, modelId?: string, previousId?: string) {
+  if (previousId) {
+    const old = await requireConversation(user, previousId, true);
+    const ws = await ensureSession(user, old);
+    const { switchClient } = await import('./working-sessions');
+    const result = await switchClient(user, ws.id);
+    if (!result) throw new BadRequestException('Смена уже выполняется');
+    return result.conversation;
+  }
   return store.withLock('active-conversation-capacity', async () => {
     const previous = previousId ? await requireConversation(user, previousId, true) : null;
     if (previous && previous.status !== 'active') throw new BadRequestException('Сессия завершена');
@@ -94,7 +103,7 @@ export async function createConversation(user: SessionUser, modelId?: string, pr
     if (!selected) throw new BadRequestException('Выберите доступную модель');
     const history = await store.list<Conversation>(user.orgId, 'conversation');
     for (const prev of history.filter((c) => c.userId === user.id && c.status === 'active'))
-      await finish(user, prev.id);
+      await finishWorkingSession(user, (await ensureSession(user, prev)).id);
     let active = 0;
     for (const org of await store.organizations())
       active += (await store.list<Conversation>(org, 'conversation')).filter(
@@ -108,14 +117,30 @@ export async function createConversation(user: SessionUser, modelId?: string, pr
       `Клиент №${String(history.length + 1).padStart(2, '0')}`,
     );
     c.sessionId = previous?.sessionId || previous?.id || c.id;
+    c.audioStartMs = 0;
     c.assistanceMode = config.defaultAssistanceMode;
     await store.put(user.orgId, 'conversation', c.id, c);
+    await ensureSession(user, c);
     update(c);
     return c;
   });
 }
 export async function finish(user: SessionUser, id: string) {
-  await requireConversation(user, id, true);
+  const previous = await requireConversation(user, id, true);
+  const sid = previous.sessionId || previous.id;
+  await store.withLock(sessionKey(user.orgId, sid), async () => {
+    const ws = await store.get<import('@sufler/shared').WorkingSession>(
+      user.orgId,
+      'work-session',
+      sid,
+    );
+    if (ws?.activeId === id)
+      await store.put(user.orgId, 'work-session', sid, {
+        ...ws,
+        status: 'completed',
+        revision: ws.revision + 1,
+      });
+  });
   cancel(id);
   roleJobs.get(id)?.abort();
   const c = await store.mutateConversation(user.orgId, id, (v) => ({
@@ -157,8 +182,9 @@ export async function addSegment(user: SessionUser, id: string, segment: Transcr
               : s,
           )
         : v.segments;
-    next.segments = [...prior, { ...segment, text: maskPII(segment.text) }].slice(-1000);
+    next.segments = [...prior, { ...segment, text: maskPII(segment.text) }];
     next.error = null;
+    next.lastConfirmedAt = new Date().toISOString();
     return next;
   });
   if (!c) return current;
@@ -294,15 +320,20 @@ async function recordError(user: SessionUser, id: string, error: unknown) {
   );
   if (c) update(c);
 }
-async function classifyLatest(user: SessionUser, snapshot: Conversation) {
+export async function reclassify(user: SessionUser, c: Conversation) {
+  if (!c.mergedInto && c.segments.length) await classifyLatest(user, c, c.status === 'completed');
+}
+async function classifyLatest(user: SessionUser, snapshot: Conversation, historical = false) {
   const controller = new AbortController();
   classifiers.set(snapshot.id, controller);
-  const status = (message: string) => {
+  let statusMessage = '';
+  const status = (message: string, pending = true) => {
+    statusMessage = message;
     if (!controller.signal.aborted)
       emit(user.orgId, user.id, {
         type: 'context.status',
         conversationId: snapshot.id,
-        data: { message },
+        data: { message, pending },
       });
   };
   status('Decision Model · анализируем подтверждённую реплику…');
@@ -323,6 +354,7 @@ async function classifyLatest(user: SessionUser, snapshot: Conversation) {
       status(`Контекст не обновлён: ${providerError(error)}`);
       // Sales advice can use confirmed speech even if classification fails.
       if (
+        !historical &&
         snapshot.autoHints &&
         (snapshot.assistanceMode || config.defaultAssistanceMode) === 'scripts' &&
         !controller.signal.aborted
@@ -336,7 +368,7 @@ async function classifyLatest(user: SessionUser, snapshot: Conversation) {
     if (controller.signal.aborted) return;
     const c = await store.mutateConversation(user.orgId, snapshot.id, (v) => {
       if (
-        v.status !== 'active' ||
+        (v.status !== 'active' && !historical) ||
         v.card.revision !== snapshot.card.revision ||
         v.generationEpoch !== snapshot.generationEpoch
       )
@@ -370,6 +402,7 @@ async function classifyLatest(user: SessionUser, snapshot: Conversation) {
       at: new Date().toISOString(),
     });
     if (
+      !historical &&
       c.autoHints &&
       (result.patch.shouldHint ||
         findUrgent(c, docs) ||
@@ -377,7 +410,10 @@ async function classifyLatest(user: SessionUser, snapshot: Conversation) {
     )
       await makeHint(user, c.id, '', false);
   } finally {
-    if (classifiers.get(snapshot.id) === controller) classifiers.delete(snapshot.id);
+    if (classifiers.get(snapshot.id) === controller) {
+      status(statusMessage, false);
+      classifiers.delete(snapshot.id);
+    }
   }
 }
 export async function configureConversation(
@@ -545,7 +581,7 @@ export async function makeHint(
     const hash = createHash('sha256')
       .update(
         JSON.stringify({
-          policy: 'fast-no-ui-actions-v2',
+          policy: 'markdown-session-v3',
           org: user.orgId,
           context: compactContext(c.card, c.segments),
           model: c.modelId,
@@ -598,6 +634,10 @@ export async function makeHint(
       const hint = renderHint(c.card, refs, c.modelId, {
         ...(scriptStep ? { title: 'Следующий шаг скрипта' } : {}),
         latencyMs: Date.now() - start,
+        pipelineLatencyMs:
+          !config.demo && !manual && !question && c.lastConfirmedAt
+            ? Math.max(0, Date.now() - Date.parse(c.lastConfirmedAt))
+            : undefined,
         inputTokens: cached ? 0 : selected.inputTokens,
         outputTokens: cached ? 0 : selected.outputTokens,
       });
@@ -635,8 +675,8 @@ export async function makeHint(
         return {
           ...v,
           card: { ...v.card, shownOffers: [...new Set([...v.card.shownOffers, ...offers])] },
-          hints: [...v.hints.map((h) => ({ ...h, status: 'stale' as const })), hint].slice(-100),
-          messages: [...v.messages, ...message].slice(-100),
+          hints: [...v.hints.map((h) => ({ ...h, status: 'stale' as const })), hint],
+          messages: [...v.messages, ...message],
           lastAutoHintAt: manual ? v.lastAutoHintAt : Date.now(),
           error: null,
         };
@@ -690,7 +730,7 @@ async function makeCoachingHint(
   const hash = createHash('sha256')
     .update(
       JSON.stringify({
-        policy: 'fast-no-ui-actions-v2',
+        policy: 'markdown-session-v3',
         context: compactContext(c.card, c.segments),
         messages: question ? c.messages.slice(-6) : [],
         model: c.modelId,
@@ -727,6 +767,10 @@ async function makeCoachingHint(
       modelId: c.modelId,
       createdAt: new Date().toISOString(),
       latencyMs: Date.now() - start,
+      pipelineLatencyMs:
+        !config.demo && !manual && !question && c.lastConfirmedAt
+          ? Math.max(0, Date.now() - Date.parse(c.lastConfirmedAt))
+          : undefined,
       inputTokens: cached ? 0 : advice.inputTokens,
       outputTokens: cached ? 0 : advice.outputTokens,
       cost: null,
@@ -743,7 +787,7 @@ async function makeCoachingHint(
         return null;
       return {
         ...v,
-        hints: [...v.hints.map((h) => ({ ...h, status: 'stale' as const })), hint].slice(-100),
+        hints: [...v.hints.map((h) => ({ ...h, status: 'stale' as const })), hint],
         messages: question
           ? [
               ...v.messages,
@@ -760,7 +804,7 @@ async function makeCoachingHint(
                 hint,
                 createdAt: hint.createdAt,
               },
-            ].slice(-100)
+            ]
           : v.messages,
         lastAutoHintAt: manual ? v.lastAutoHintAt : Date.now(),
         error: null,

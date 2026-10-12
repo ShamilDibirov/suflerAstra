@@ -32,7 +32,7 @@ export function Library({ history = false }: { history?: boolean }) {
           <h1>{history ? 'Ваши диалоги' : 'Ваша база знаний'}</h1>
           <p>
             {history
-              ? 'Контекст, подсказки и записи консультаций за последние 30 дней.'
+              ? 'Контекст, подсказки и записи сохранённых консультаций.'
               : 'Проверенные инструкции и условия вашей организации.'}
           </p>
         </div>
@@ -135,14 +135,6 @@ export function Library({ history = false }: { history?: boolean }) {
       >
         <div className="history-detail">
           {dialog && <RecordingPlayer key={dialog.id} conversation={dialog} />}
-          {dialog?.segments.map((s) => (
-            <div key={s.id}>
-              <small>
-                {roleLabels[s.role]} · {formatTime(s.createdAt)}
-              </small>
-              <p style={{ fontSize: 13, marginTop: 5 }}>{s.text}</p>
-            </div>
-          ))}
           <Button
             variant="destructive"
             onClick={async () => {

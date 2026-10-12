@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const require = createRequire(new URL('../apps/api/package.json', import.meta.url));
-const { WebSocket } = require('ws');
+const { WebSocket, WebSocketServer } = require('ws');
 const suffix = randomBytes(6).toString('hex'),
   name = `sufler-auth-test-${suffix}`;
 const secret = randomBytes(24).toString('hex'),
@@ -39,6 +39,37 @@ const speechMock = createServer(async (req, res) => {
   res
     .writeHead(200, { 'Content-Type': 'application/json' })
     .end(JSON.stringify({ available: voiceProfiles.has(profileId), ok: true }));
+});
+let speechConnections = 0,
+  speechFrames = 0;
+const speechSockets = new WebSocketServer({ server: speechMock });
+speechSockets.on('connection', (ws) => {
+  speechConnections++;
+  let duration = 0;
+  ws.on('message', (data, binary) => {
+    if (binary) {
+      duration += data.length / 32;
+      speechFrames++;
+      return;
+    }
+    const message = JSON.parse(data.toString());
+    if (message.type === 'start') ws.send(JSON.stringify({ type: 'ready' }));
+    if (message.type === 'stop') {
+      if (duration)
+        ws.send(
+          JSON.stringify({
+            type: 'segment',
+            text: 'Здравствуйте, выбираю телефон',
+            speakerId: 'test:0',
+            role: 'customer',
+            startMs: 0,
+            endMs: duration,
+            confidence: 0.98,
+          }),
+        );
+      ws.close();
+    }
+  });
 });
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 async function ready(url) {
@@ -98,6 +129,7 @@ try {
     BETTER_AUTH_SECRET: secret,
     INTERNAL_SERVICE_TOKEN: secret,
     DASHSCOPE_API_KEY: '',
+    AUDIO_RECORDING_ENABLED: 'false',
     BOOTSTRAP_EMAIL: `owner-${suffix}@example.test`,
     BOOTSTRAP_NAME: 'Test owner',
     BOOTSTRAP_PASSWORD: password,
@@ -217,6 +249,7 @@ try {
 
   assert.equal((await call(`/api/conversations/${b.id}`, { cookie: staff })).status, 404);
   assert.equal((await call(`/api/recordings/${b.id}/0`, { cookie: owner })).status, 404);
+  assert.equal((await call(`/api/conversations/${b.id}/audio`, { cookie: owner })).status, 404);
   assert.equal((await call(`/api/conversations/${a.id}`, { cookie: other })).status, 404);
   assert.equal(
     (
@@ -414,6 +447,103 @@ try {
       }
     });
   });
+  // Continuous session routing: switch and undo never restart the upstream socket.
+  await pause(100);
+  const work = (await call(`/api/sessions/${a.id}`, { cookie: staff })).body;
+  assert.equal((await call(`/api/sessions/${a.id}`, { cookie: other })).status, 404);
+  assert.equal((await call('/api/admin/metrics', { cookie: staff })).status, 403);
+  assert.equal((await call('/api/admin/tariffs', { cookie: staff })).status, 403);
+  const tariffBody = {
+    modelId: 'qwen-test',
+    input: 2,
+    output: 6,
+    cached: 1,
+    effectiveAt: new Date().toISOString(),
+  };
+  assert.equal(
+    (await call('/api/admin/tariffs', { cookie: owner, method: 'POST', body: tariffBody })).status,
+    201,
+  );
+  assert.equal((await call('/api/admin/tariffs', { cookie: other })).body.length, 0);
+  assert.equal((await call('/api/admin/metrics', { cookie: owner })).status, 200);
+  await new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/live?sessionId=${work.id}`, {
+      headers: { Cookie: staff, Origin: origin },
+    });
+    const timer = setTimeout(() => {
+      ws.terminate();
+      reject(new Error('Continuous session test timed out'));
+    }, 10000);
+    let tested = false;
+    ws.on('error', reject);
+    ws.on('open', () => ws.send(JSON.stringify({ type: 'audio.start' })));
+    ws.on('message', async (raw) => {
+      const event = JSON.parse(raw.toString());
+      if (event.type !== 'audio.status' || event.data.status !== 'listening' || tested) return;
+      tested = true;
+      try {
+        const before = speechConnections;
+        const frame = (seq, start) => {
+          const b = Buffer.alloc(3212);
+          b.writeUInt32LE(0x53554631, 0);
+          b.writeUInt32LE(seq, 4);
+          b.writeUInt32LE(start, 8);
+          return b;
+        };
+        ws.send(frame(0, 0));
+        await pause(100);
+        const next = await call(`/api/sessions/${work.id}/next`, {
+          cookie: staff,
+          method: 'POST',
+          body: {},
+        });
+        assert.equal(next.status, 201);
+        assert(next.body.boundary.id);
+        assert.equal(
+          (
+            await call(`/api/sessions/${work.id}/undo`, {
+              cookie: other,
+              method: 'POST',
+              body: { boundaryId: next.body.boundary.id },
+            })
+          ).status,
+          404,
+        );
+        ws.send(frame(1, 1600));
+        await pause(100);
+        const undone = await call(`/api/sessions/${work.id}/undo`, {
+          cookie: staff,
+          method: 'POST',
+          body: { boundaryId: next.body.boundary.id },
+        });
+        assert.equal(undone.status, 201);
+        assert.equal(undone.body.conversation.id, a.id);
+        assert.equal(speechConnections, before);
+        assert(speechFrames >= 2);
+        ws.send(JSON.stringify({ type: 'audio.stop' }));
+        const stopped = await new Promise((r) => {
+          const receive = (raw) => {
+            const e = JSON.parse(raw.toString());
+            if (e.type === 'audio.status' && e.data.status === 'stopped') {
+              ws.off('message', receive);
+              r(true);
+            }
+          };
+          ws.on('message', receive);
+        });
+        assert(stopped);
+        const sessionAfter = (await call(`/api/sessions/${a.id}`, { cookie: staff })).body;
+        assert.equal(sessionAfter.timelineMs, 200);
+        clearTimeout(timer);
+        ws.close();
+        resolve();
+      } catch (e) {
+        clearTimeout(timer);
+        ws.terminate();
+        reject(e);
+      }
+    });
+  });
   console.log(
     'PASS: PostgreSQL migration/bootstrap; password sign-in; no public sign-up; organization and role isolation; Origin checks; authorized/unauthorized WebSocket; prompt sales requires provider key, not knowledge; protected organization prompts; real-mode script publication without knowledge service; zero-token steps; role/tenant isolation for scripts.',
   );
@@ -423,6 +553,8 @@ try {
   process.exitCode = 1;
 } finally {
   server?.kill('SIGTERM');
+  for (const ws of speechSockets.clients) ws.terminate();
+  speechSockets.close();
   await new Promise((resolve) => speechMock.close(resolve));
   try {
     docker('rm', '-f', name);

@@ -39,7 +39,7 @@ export function socketUrl(conversationId?: string) {
     : new URL(
         `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hostname}${location.port === '3000' ? ':4000' : location.port ? `:${location.port}` : ''}/api/live`,
       );
-  if (conversationId) url.searchParams.set('conversationId', conversationId);
+  if (conversationId) url.searchParams.set('sessionId', conversationId);
   return url.toString();
 }
 export const formatTime = (date: string) =>
