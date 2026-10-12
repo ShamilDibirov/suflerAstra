@@ -1,16 +1,17 @@
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { generateText } from 'ai';
-import { classify, selectEvidence, salesAdvice, validateCoaching } from './ai';
+import { classify, selectEvidence, salesAdvice, validateCoaching, testDecisionModel } from './ai';
 import { newConversation } from '@sufler/shared/engine';
 import { demoDocuments } from '@sufler/shared/demo';
 import { MODEL_DEFAULTS, PatchSchema, SegmentSchema } from '@sufler/shared';
 vi.mock('./config', () => ({
   config: {
     demo: false,
-    openrouter: 'test-key',
-    classifier: 'jaredpalmer/kev-4b',
-    fallback: 'qwen/qwen3.5-9b',
-    kevThreshold: 0.85,
+    dashscope: 'test-key',
+    modelStudioBaseUrl: 'https://test.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+    classifier: 'decision-model-preview',
+    fallback: 'qwen3.8-flash',
+    decisionThreshold: 0.85,
   },
 }));
 vi.mock('ai', () => ({ generateText: vi.fn(), Output: { object: vi.fn((schema) => schema) } }));
@@ -61,19 +62,19 @@ afterEach(() => vi.unstubAllGlobals());
 describe('provider contracts with mocked responses (not model quality)', () => {
   it('uses Decisions choice/noul, masks phone and preserves model token usage', async () => {
     const r = await classify(card(), demoDocuments('org'), new AbortController().signal);
-    expect(r.source).toBe('kev');
+    expect(r.source).toBe('decision');
     expect(r.patch.intent).toBe('sim_replacement');
     expect(r.patch.shouldHint).toBe(true);
     expect(r.usage.inputTokens).toBe(120);
     expect(generateText).not.toHaveBeenCalled();
     const [url, options] = fetchMock.mock.calls[0];
-    expect(url).toBe('https://openrouter.ai/api/alpha/decisions');
+    expect(url).toBe('https://test.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/systemone');
     const request = JSON.parse(options.body);
-    expect(request.model).toBe('jaredpalmer/kev-4b');
+    expect(request.model).toBe('decision-model-preview');
     expect(request.state).toContain('[ТЕЛЕФОН]');
     expect(request.state).not.toContain('123-45-67');
   });
-  it('uses Qwen fallback on low KEV confidence', async () => {
+  it('uses Qwen fallback on low Decision Model confidence', async () => {
     fetchMock.mockResolvedValue(new Response(JSON.stringify(response(0.5))));
     const r = await classify(card(), demoDocuments('org'), new AbortController().signal);
     expect(r.source).toBe('qwen');
@@ -96,10 +97,10 @@ describe('provider contracts with mocked responses (not model quality)', () => {
     expect(r.patch.intent).toBe('unknown');
     expect(r.patch.secondaryIntents).toEqual([]);
   });
-  it('does not silently fall back in KEV-only evaluation', async () => {
+  it('does not silently fall back in Decision Model-only evaluation', async () => {
     fetchMock.mockResolvedValue(new Response('{}', { status: 503 }));
     await expect(
-      classify(card(), demoDocuments('org'), new AbortController().signal, 'kev'),
+      classify(card(), demoDocuments('org'), new AbortController().signal, 'decision'),
     ).rejects.toThrow();
     expect(generateText).not.toHaveBeenCalled();
   });
@@ -154,7 +155,7 @@ it('generates prompt sales advice without retrieval, using selected model and ma
   expect(validateCoaching('Тариф стоит 500 рублей.')).not.toContain('500');
 });
 
-it('offers general sales intents to KEV without knowledge documents', async () => {
+it('offers general sales intents to Decision Model without knowledge documents', async () => {
   const c = card();
   c.assistanceMode = 'scripts';
   const data = response();
@@ -167,4 +168,22 @@ it('offers general sales intents to KEV without knowledge documents', async () =
   expect(result.patch.intent).toBe('sales_discovery');
   const payload = JSON.parse(fetchMock.mock.calls[0][1].body);
   expect(payload.questions.intent.criteria).toHaveProperty('device_selection');
+});
+
+it('checks the standalone Decision Model endpoint with bearer authentication', async () => {
+  fetchMock.mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        model: 'decision-model-preview',
+        answers: { route: { type: 'choice', choice: 'sales', confidence: 0.9 } },
+        usage: { input_tokens: 25 },
+      }),
+      { headers: { 'Content-Type': 'application/json' } },
+    ),
+  );
+  expect(await testDecisionModel()).toEqual({ ok: true, demo: false });
+  const [url, request] = fetchMock.mock.calls[0];
+  expect(url).toContain('/compatible-mode/v1/systemone');
+  expect(request.headers.Authorization).toBe('Bearer test-key');
+  expect(JSON.parse(request.body).model).toBe('decision-model-preview');
 });

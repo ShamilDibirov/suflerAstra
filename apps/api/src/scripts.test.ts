@@ -137,7 +137,7 @@ describe('sales scripts without RAG', () => {
         confidence: 0.9,
         shouldHint: false,
       }),
-      source: 'kev',
+      source: 'decision',
       usage: { inputTokens: 1, outputTokens: 1, cost: 0 },
     });
     await addSegment(
@@ -154,7 +154,7 @@ describe('sales scripts without RAG', () => {
       expect(
         (await store.get<any>(user.orgId, 'conversation', conversation.id)).card
           .classificationSource,
-      ).toBe('kev'),
+      ).toBe('decision'),
     );
     vi.mocked(selectEvidence).mockResolvedValue({
       selection: [{ documentId: 'invented', blockId: 'invented' }],

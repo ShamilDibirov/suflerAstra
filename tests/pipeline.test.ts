@@ -33,7 +33,7 @@ const classification = {
     shouldHint: false,
     confidence: 0.95,
   }),
-  source: 'kev' as const,
+  source: 'decision' as const,
   usage: { inputTokens: 10, outputTokens: 1, cost: 0 },
 };
 const segment = (text = 'Нужно заменить сим-карту') =>
@@ -75,7 +75,7 @@ const waitForClassification = async (id: string) => {
   await vi.waitFor(async () =>
     expect(
       (await store.get<Conversation>(user.orgId, 'conversation', id))?.card.classificationSource,
-    ).toBe('kev'),
+    ).toBe('decision'),
   );
 };
 describe('server authorization and asynchronous state', () => {

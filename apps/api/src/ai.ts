@@ -1,5 +1,5 @@
 import { generateText, Output } from 'ai';
-import { createOpenRouter } from '@openrouter/ai-sdk-provider';
+import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { z } from 'zod';
 import {
   PatchSchema,
@@ -11,7 +11,22 @@ import { compactContext, eligibleSegments, maskPII } from '@sufler/shared/engine
 import { demoClassification } from '@sufler/shared/demo';
 import { config } from './config';
 
-const router = createOpenRouter({ apiKey: config.openrouter });
+function studio() {
+  if (!config.dashscope) throw new Error('Добавьте DASHSCOPE_API_KEY на сервере');
+  if (!config.modelStudioBaseUrl)
+    throw new Error('Добавьте MODEL_STUDIO_WORKSPACE_ID или MODEL_STUDIO_BASE_URL на сервере');
+  const base = new URL(config.modelStudioBaseUrl);
+  if (
+    base.protocol !== 'https:' ||
+    base.username ||
+    base.password ||
+    base.search ||
+    base.hash ||
+    !base.pathname.replace(/\/$/, '').endsWith('/compatible-mode/v1')
+  )
+    throw new Error('Проверьте MODEL_STUDIO_BASE_URL: нужен HTTPS endpoint /compatible-mode/v1');
+  return base.toString().replace(/\/$/, '');
+}
 const answerChoice = z.object({
   type: z.literal('choice'),
   choice: z.string(),
@@ -31,18 +46,39 @@ const decisionResponse = z.object({
     .optional(),
 });
 function model(id: string) {
-  if (!config.openrouter) throw new Error('Добавьте OPENROUTER_API_KEY на сервере');
-  return router.chat(id, { reasoning: { enabled: false, effort: 'none' } });
+  return createOpenAICompatible({
+    name: 'alibaba',
+    apiKey: config.dashscope,
+    baseURL: studio(),
+    // Pass the SDK schema as an instruction; Singapore uses JSON mode, not native strict schema.
+    supportsStructuredOutputs: true,
+    transformRequestBody: (body) => {
+      const schema = body.response_format?.json_schema?.schema;
+      const messages = [...body.messages];
+      if (schema) {
+        const instruction = `Верни только валидный JSON, соответствующий схеме: ${JSON.stringify(schema)}. Без Markdown и дополнительного текста.`;
+        if (messages[0]?.role === 'system' && typeof messages[0].content === 'string')
+          messages[0] = { ...messages[0], content: `${messages[0].content}\n${instruction}` };
+        else messages.unshift({ role: 'system', content: instruction });
+      }
+      return {
+        ...body,
+        messages,
+        ...(schema ? { response_format: { type: 'json_object' } } : {}),
+        ...(id.startsWith('qwen') ? { enable_thinking: false } : {}),
+      };
+    },
+  }).chatModel(id);
 }
 export async function classify(
   conversation: Conversation,
   docs: KnowledgeDocument[],
   signal: AbortSignal,
-  mode: 'pipeline' | 'kev' | 'qwen' = 'pipeline',
+  mode: 'pipeline' | 'decision' | 'qwen' = 'pipeline',
   onFallback?: (reason: string) => void,
 ): Promise<{
   patch: ConversationStatePatch;
-  source: 'kev' | 'qwen' | 'demo';
+  source: 'decision' | 'qwen' | 'demo';
   usage: { inputTokens: number; outputTokens: number; cost: number | null };
 }> {
   if (config.demo)
@@ -72,11 +108,10 @@ export async function classify(
   });
   try {
     if (mode === 'qwen') throw new Error('Forced Qwen evaluation');
-    if (!config.openrouter) throw new Error('Нет ключа OpenRouter');
-    const response = await fetch('https://openrouter.ai/api/alpha/decisions', {
+    const response = await fetch(`${studio()}/systemone`, {
       method: 'POST',
       signal: AbortSignal.any([signal, AbortSignal.timeout(12000)]),
-      headers: { Authorization: `Bearer ${config.openrouter}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${config.dashscope}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: config.classifier,
         state: context,
@@ -129,17 +164,17 @@ export async function classify(
         },
       }),
     });
-    if (!response.ok) throw new Error(`KEV: HTTP ${response.status}`);
+    if (!response.ok) throw new Error(`Alibaba Decision Model: HTTP ${response.status}`);
     const data = decisionResponse.parse(await response.json());
     const get = (key: string, allowed: Record<string, string> | string[]) => {
       const v = data.answers[key];
       if (
         !v ||
         v.type !== 'choice' ||
-        (mode !== 'kev' && v.confidence < config.kevThreshold) ||
+        (mode !== 'decision' && v.confidence < config.decisionThreshold) ||
         !(Array.isArray(allowed) ? allowed.includes(v.choice) : v.choice in allowed)
       )
-        throw new Error('KEV: требуется уточнение классификации');
+        throw new Error('Alibaba Decision Model: требуется уточнение классификации');
       return v;
     };
     const direction = get('direction', ['unknown', 'service', 'sales', 'mixed']),
@@ -160,7 +195,7 @@ export async function classify(
       stage: stage.choice,
       secondaryIntents:
         secondary?.type === 'choice' &&
-        secondary.confidence >= config.kevThreshold &&
+        secondary.confidence >= config.decisionThreshold &&
         secondary.choice !== intent.choice &&
         secondary.choice !== 'unknown' &&
         secondary.choice in intents
@@ -173,7 +208,7 @@ export async function classify(
       objections:
         objection?.type === 'choice' &&
         objection.choice !== 'none' &&
-        objection.confidence >= config.kevThreshold
+        objection.confidence >= config.decisionThreshold
           ? [
               { price: 'Цена', need: 'Нет потребности', trust: 'Сомнение', later: 'Позже' }[
                 objection.choice
@@ -194,7 +229,7 @@ export async function classify(
     }
     return {
       patch,
-      source: 'kev',
+      source: 'decision',
       usage: {
         inputTokens: (data.usage?.input_tokens || 0) + extra.inputTokens,
         outputTokens: (data.usage?.output_tokens || 0) + extra.outputTokens,
@@ -202,7 +237,7 @@ export async function classify(
       },
     };
   } catch (error) {
-    if (signal.aborted || mode === 'kev') throw error;
+    if (signal.aborted || mode === 'decision') throw error;
     onFallback?.(providerError(error));
     const result = await generateText({
       model: model(config.fallback),
@@ -302,15 +337,17 @@ export function providerError(error: unknown): string {
   const status = value?.statusCode;
   const message = value?.message || '';
   if (status === 403 || /Forbidden|HTTP 403/i.test(message))
-    return 'OpenRouter: HTTP 403 — доступ запрещён. Проверьте ограничения аккаунта, ключа и доступ к API с сервера.';
+    return 'Alibaba Model Studio: HTTP 403 — доступ запрещён. Проверьте ограничения аккаунта, ключа и доступ к API с сервера.';
   if (status === 401 || /HTTP 401/i.test(message))
-    return 'OpenRouter: HTTP 401 — проверьте API-ключ.';
+    return 'Alibaba Model Studio: HTTP 401 — проверьте API-ключ.';
   if (status === 402 || /HTTP 402/i.test(message))
-    return 'OpenRouter: HTTP 402 — недостаточно средств или превышен бюджет ключа.';
+    return 'Alibaba Model Studio: HTTP 402 — недостаточно средств или превышен бюджет ключа.';
   if (status === 429 || /HTTP 429/i.test(message))
-    return 'OpenRouter: HTTP 429 — лимит запросов. Повторите позже.';
-  if (/Нет ключа|OPENROUTER_API_KEY/.test(message))
-    return 'Добавьте OPENROUTER_API_KEY в runtime env и пересоздайте API.';
+    return 'Alibaba Model Studio: HTTP 429 — лимит запросов. Повторите позже.';
+  if (/MODEL_STUDIO_WORKSPACE_ID|MODEL_STUDIO_BASE_URL/.test(message))
+    return 'Настройте MODEL_STUDIO_WORKSPACE_ID или HTTPS MODEL_STUDIO_BASE_URL (/compatible-mode/v1) в Coolify и пересоздайте API.';
+  if (/Нет ключа|DASHSCOPE_API_KEY/.test(message))
+    return 'Добавьте DASHSCOPE_API_KEY в runtime env и пересоздайте API.';
   if (value?.name === 'TimeoutError' || /timeout|timed out/i.test(message))
     return 'Провайдер не ответил вовремя. Повторите запрос.';
   if (value?.cause && value.cause !== error) return providerError(value.cause);
@@ -412,4 +449,32 @@ export async function salesAdvice(
     inputTokens: result.usage.inputTokens || 0,
     outputTokens: result.usage.outputTokens || 0,
   };
+}
+
+export async function testDecisionModel() {
+  if (config.demo) return { ok: true, demo: true };
+  const response = await fetch(`${studio()}/systemone`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${config.dashscope}`, 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(12000),
+    body: JSON.stringify({
+      model: config.classifier,
+      state: 'Клиент хочет купить телефон.',
+      questions: {
+        route: {
+          type: 'choice',
+          instructions: 'Classify this Russian retail request.',
+          criteria: { sales: 'Покупка телефона', service: 'Замена SIM-карты', unknown: 'Другое' },
+        },
+      },
+    }),
+  });
+  if (!response.ok) throw new Error(`Alibaba Decision Model: HTTP ${response.status}`);
+  const data = decisionResponse.parse(await response.json());
+  if (
+    data.answers.route?.type !== 'choice' ||
+    !['sales', 'service', 'unknown'].includes(data.answers.route.choice)
+  )
+    throw new Error('Decision Model: invalid response');
+  return { ok: true, demo: false };
 }

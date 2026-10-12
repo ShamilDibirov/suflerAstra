@@ -761,9 +761,9 @@ export function Workspace() {
                     ? 'Уточнено консультантом'
                     : card?.classificationSource === 'qwen'
                       ? 'Контекст · резервный Qwen'
-                      : card?.classificationSource === 'kev'
-                        ? 'Контекст обновлён · KEV 4B'
-                        : 'KEV ещё не определил контекст')}
+                      : card?.classificationSource === 'decision'
+                        ? 'Контекст обновлён · Alibaba Decision Model'
+                        : 'Decision Model ещё не определил контекст')}
               <span style={{ marginLeft: 'auto' }}>v{card?.revision || 0}</span>
             </div>
           </section>

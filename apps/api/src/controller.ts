@@ -45,7 +45,7 @@ import {
   cancel,
 } from './conversations';
 import { saveDocument, publishDocument, addSalesTemplates } from './knowledge';
-import { draftProcess, testModel, providerError } from './ai';
+import { draftProcess, testModel, testDecisionModel, providerError } from './ai';
 import { putFile, getFile } from './storage';
 import { enqueueIngest, deleteConversation } from './infra';
 import { fromNodeHeaders } from 'better-auth/node';
@@ -59,6 +59,14 @@ export class ApiController {
   }
   @Post('admin/prompts') async updatePrompts(@Req() req: Request, @Body() body: unknown) {
     return savePrompts(await session(req), body);
+  }
+  @Post('admin/classifier/test') async classifierTest(@Req() req: Request) {
+    assertAdmin(await session(req));
+    try {
+      return await testDecisionModel();
+    } catch (error) {
+      throw new BadRequestException(providerError(error));
+    }
   }
   @Get('health') health() {
     return { ok: true, service: 'sufler-api' };

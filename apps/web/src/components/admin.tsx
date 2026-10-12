@@ -561,9 +561,26 @@ export function Admin({ section }: { section: string }) {
       {section === 'models' && (
         <>
           <div className="info-banner">
-            <strong>Классификатор контекста — KEV 4B.</strong> Его фактический статус показан в
-            карточке диалога. Модель ниже отвечает за подсказки и чат. Смена модели сохраняет
-            карточку клиента. Резервный классификатор настраивается на сервере отдельно.
+            <strong>Классификатор контекста — Alibaba Decision Model.</strong> Его фактический
+            статус показан в карточке диалога. Модель ниже отвечает за подсказки и чат. Смена модели
+            сохраняет карточку клиента. Резервный классификатор настраивается на сервере отдельно.
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={busy}
+              onClick={() =>
+                void run(async () => {
+                  const result = await post<{ demo: boolean }>('/admin/classifier/test');
+                  notify(
+                    result.demo
+                      ? 'Деморежим: API не вызывался'
+                      : 'Decision Model отвечает. Качество на русском проверяется отдельно.',
+                  );
+                })
+              }
+            >
+              Проверить классификатор
+            </Button>
           </div>
           <div className="model-grid">
             {models.map((m) => (
@@ -952,7 +969,7 @@ export function Admin({ section }: { section: string }) {
         open={modelDialog}
         onOpenChange={setModelDialog}
         title="Добавить AI-модель"
-        description="Укажите точный идентификатор модели OpenRouter"
+        description="Укажите точный идентификатор модели Alibaba Model Studio"
       >
         <form
           onSubmit={(e) => {
@@ -976,16 +993,16 @@ export function Admin({ section }: { section: string }) {
               <input
                 value={modelName}
                 onChange={(e) => setModelName(e.target.value)}
-                placeholder="Qwen 3.5 · 9B"
+                placeholder="Qwen 3.8 Flash"
                 required
               />
             </label>
             <label className="full">
-              Идентификатор OpenRouter
+              Идентификатор Alibaba Model Studio
               <input
                 value={modelId}
                 onChange={(e) => setModelId(e.target.value)}
-                placeholder="qwen/qwen3.5-9b"
+                placeholder="qwen3.8-flash"
                 required
               />
             </label>

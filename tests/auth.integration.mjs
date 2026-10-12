@@ -72,7 +72,7 @@ try {
     PORT: String(port),
     BETTER_AUTH_SECRET: secret,
     INTERNAL_SERVICE_TOKEN: secret,
-    OPENROUTER_API_KEY: '',
+    DASHSCOPE_API_KEY: '',
     BOOTSTRAP_EMAIL: `owner-${suffix}@example.test`,
     BOOTSTRAP_NAME: 'Test owner',
     BOOTSTRAP_PASSWORD: password,
@@ -197,7 +197,7 @@ try {
     body: {},
   });
   assert.equal(hint.status, 400);
-  assert.match(hint.body.message, /OPENROUTER_API_KEY/);
+  assert.match(hint.body.message, /DASHSCOPE_API_KEY/);
   const promptValues = {
     hintPrompt: 'Уточняй потребность и бюджет без давления.',
     chatPrompt: 'Помогай отвечать на возражения и уважай отказ.',
@@ -225,6 +225,38 @@ try {
     (await call('/api/admin/sales-templates', { cookie: staff, method: 'POST', body: {} })).status,
     403,
   );
+  assert.equal(
+    (await call('/api/admin/classifier/test', { cookie: staff, method: 'POST', body: {} })).status,
+    403,
+  );
+  assert.equal(
+    (await call('/api/admin/classifier/test', { cookie: owner, method: 'POST', body: {} })).status,
+    400,
+  );
+  assert.equal(
+    (
+      await call('/api/admin/models', {
+        cookie: owner,
+        method: 'POST',
+        body: { id: 'qwen/qwen3.5-9b', name: 'Legacy Qwen', enabled: true, isDefault: true },
+      })
+    ).status,
+    201,
+  );
+  await call(`/api/conversations/${a.id}`, {
+    cookie: staff,
+    method: 'PATCH',
+    body: { modelId: 'qwen/qwen3.5-9b' },
+  });
+  cli('migrate');
+  const migratedModels = (await call('/api/admin/models', { cookie: owner })).body;
+  assert(migratedModels.some((m) => m.id === 'qwen3.8-27b' && m.isDefault));
+  assert(!migratedModels.some((m) => m.id === 'qwen/qwen3.5-9b'));
+  assert.equal(
+    (await call(`/api/conversations/${a.id}`, { cookie: staff })).body.modelId,
+    'qwen3.8-27b',
+  );
+  cli('migrate');
   const templates = await call('/api/admin/sales-templates', {
     cookie: owner,
     method: 'POST',

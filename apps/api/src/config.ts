@@ -8,11 +8,16 @@ export const config = {
   origin: process.env.APP_ORIGIN || 'http://localhost:3000',
   database: process.env.DATABASE_URL || '',
   redis: process.env.REDIS_URL || '',
-  openrouter: process.env.OPENROUTER_API_KEY || '',
+  dashscope: process.env.DASHSCOPE_API_KEY || '',
+  modelStudioBaseUrl:
+    process.env.MODEL_STUDIO_BASE_URL ||
+    (process.env.MODEL_STUDIO_WORKSPACE_ID
+      ? `https://${process.env.MODEL_STUDIO_WORKSPACE_ID}.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1`
+      : ''),
   mistral: process.env.MISTRAL_API_KEY || '',
-  classifier: process.env.KEV_MODEL || 'jaredpalmer/kev-4b',
-  fallback: process.env.CLASSIFIER_FALLBACK_MODEL || 'qwen/qwen3.5-9b',
-  kevThreshold: Number(process.env.KEV_CONFIDENCE_THRESHOLD || 0.85),
+  classifier: process.env.DECISION_MODEL || 'decision-model-preview',
+  fallback: process.env.CLASSIFIER_FALLBACK_MODEL || 'qwen3.8-flash',
+  decisionThreshold: Number(process.env.DECISION_CONFIDENCE_THRESHOLD || 0.85),
   speech: process.env.SPEECH_URL || 'http://127.0.0.1:8001',
   knowledge: process.env.KNOWLEDGE_URL || 'http://127.0.0.1:8002',
   internalToken: process.env.INTERNAL_SERVICE_TOKEN || '',

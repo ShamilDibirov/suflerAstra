@@ -7,4 +7,4 @@ let template = await readFile(new URL('../.env.coolify.example', import.meta.url
 for (const [key, value] of Object.entries(values)) template = template.replace(new RegExp(`^${key}=.*$`, 'm'), `${key}=${value}`);
 const target = process.argv[2] || '.env.coolify.local';
 await writeFile(target, template, { flag: 'wx', mode: 0o600 });
-console.log(`Created ${target}. Set APP_ORIGIN and the three provider keys. Existing files are never overwritten; secrets are not printed.`);
+console.log(`Created ${target}. Set APP_ORIGIN, MODEL_STUDIO_WORKSPACE_ID and the three provider keys. Existing files are never overwritten; secrets are not printed.`);

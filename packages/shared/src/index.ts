@@ -52,7 +52,7 @@ export interface ConversationCard {
   shownOffers: string[];
   activeProcessId: string | null;
   ending: boolean;
-  classificationSource: 'kev' | 'qwen' | 'demo' | 'manual' | null;
+  classificationSource: 'decision' | 'kev' | 'qwen' | 'demo' | 'manual' | null;
   confidence: number | null;
   evidenceSegmentIds: string[];
   updatedAt: string;
@@ -165,7 +165,7 @@ export interface Conversation {
 export const ModelInput = z.object({
   id: z
     .string()
-    .regex(/^[a-zA-Z0-9._:-]+\/[a-zA-Z0-9._:/-]+$/)
+    .regex(/^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$/)
     .max(140),
   name: z.string().min(1).max(80),
   enabled: z.boolean().default(true),
@@ -197,24 +197,32 @@ export interface AppEvent {
 }
 export const MODEL_DEFAULTS: ModelConfig[] = [
   {
-    id: 'qwen/qwen3.5-9b',
-    name: 'Qwen 3.5 · 9B',
+    id: 'qwen3.8-27b',
+    name: 'Qwen 3.8 · 27B (open source)',
     enabled: true,
     isDefault: true,
     testedAt: null,
     testError: null,
   },
   {
-    id: 'qwen/qwen3.5-35b-a3b',
-    name: 'Qwen 3.5 · 35B',
+    id: 'qwen3.8-flash',
+    name: 'Qwen 3.8 Flash',
     enabled: true,
     isDefault: false,
     testedAt: null,
     testError: null,
   },
   {
-    id: 'moonshotai/kimi-k2.5',
-    name: 'Kimi K2.5',
+    id: 'qwen3.8-max',
+    name: 'Qwen 3.8 Max',
+    enabled: true,
+    isDefault: false,
+    testedAt: null,
+    testError: null,
+  },
+  {
+    id: 'kimi-k3',
+    name: 'Kimi K3',
     enabled: true,
     isDefault: false,
     testedAt: null,

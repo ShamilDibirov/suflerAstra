@@ -211,7 +211,7 @@ async function classifyLatest(user: SessionUser, snapshot: Conversation) {
         data: { message },
       });
   };
-  status('KEV · анализируем подтверждённую реплику…');
+  status('Decision Model · анализируем подтверждённую реплику…');
   try {
     const docs = (await store.list<KnowledgeDocument>(user.orgId, 'document')).filter(
       (d) =>
@@ -222,7 +222,7 @@ async function classifyLatest(user: SessionUser, snapshot: Conversation) {
     let result;
     try {
       result = await classify(snapshot, docs, controller.signal, 'pipeline', (reason) =>
-        status(`KEV не подтвердил контекст: ${reason}. Проверяем резервный Qwen…`),
+        status(`Decision Model не подтвердил контекст: ${reason}. Проверяем резервный Qwen…`),
       );
     } catch (error) {
       if (controller.signal.aborted) return;
@@ -265,13 +265,13 @@ async function classifyLatest(user: SessionUser, snapshot: Conversation) {
     });
     if (!c) return;
     status(
-      `Контекст обновлён · ${result.source === 'kev' ? 'KEV 4B' : result.source === 'qwen' ? 'резервный Qwen' : 'демо'}`,
+      `Контекст обновлён · ${result.source === 'decision' ? 'Alibaba Decision Model' : result.source === 'qwen' ? 'резервный Qwen' : 'демо'}`,
     );
     update(c);
     await store.put(user.orgId, 'usage', randomUUID(), {
       conversationId: c.id,
       type: 'classification',
-      model: result.source === 'kev' ? config.classifier : config.fallback,
+      model: result.source === 'decision' ? config.classifier : config.fallback,
       ...result.usage,
       at: new Date().toISOString(),
     });

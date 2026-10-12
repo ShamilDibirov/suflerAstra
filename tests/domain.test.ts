@@ -59,7 +59,7 @@ describe('evidence and conversation invariants', () => {
       emptyCard('c'),
       patch(),
       [segment({ text: 'Сейчас проверю документ' })],
-      'kev',
+      'decision',
     );
     expect(card.completedSteps).toEqual([]);
     const doc = demoDocuments('org')[0];

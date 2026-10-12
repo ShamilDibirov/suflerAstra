@@ -5,8 +5,9 @@ import { config } from './config';
 import { auth } from './auth';
 import { pool, migrateApp, store } from './store';
 import { MODEL_DEFAULTS } from '@sufler/shared';
-import { testModel, classify } from './ai';
+import { testModel, testDecisionModel, providerError, classify } from './ai';
 import { newConversation } from '@sufler/shared/engine';
+import { migrateModelStudio } from './provider-migration';
 import { demoDocuments } from '@sufler/shared/demo';
 
 async function migrate() {
@@ -14,6 +15,7 @@ async function migrate() {
   const migration = await getMigrations(auth.options);
   await migration.runMigrations();
   await migrateApp();
+  await migrateModelStudio();
   console.log('Better Auth and application schema are ready.');
 }
 async function bootstrap() {
@@ -70,11 +72,11 @@ async function bootstrap() {
 }
 async function evaluate() {
   if (config.demo)
-    throw new Error('Evaluation of real models requires DEMO_MODE=false and OPENROUTER_API_KEY');
+    throw new Error('Evaluation of real models requires DEMO_MODE=false and DASHSCOPE_API_KEY');
   const split = process.argv[3] || 'test';
   const mode = process.argv[4] || 'pipeline';
-  if (!['calibration', 'test'].includes(split) || !['pipeline', 'kev', 'qwen'].includes(mode))
-    throw new Error('Usage: eval [calibration|test] [pipeline|kev|qwen]');
+  if (!['calibration', 'test'].includes(split) || !['pipeline', 'decision', 'qwen'].includes(mode))
+    throw new Error('Usage: eval [calibration|test] [pipeline|decision|qwen]');
   const allCases = JSON.parse(
     await readFile(
       new URL(
@@ -110,7 +112,7 @@ async function evaluate() {
       c,
       docs,
       new AbortController().signal,
-      mode as 'pipeline' | 'kev' | 'qwen',
+      mode as 'pipeline' | 'decision' | 'qwen',
     );
     const ok = r.patch.intent === sample.intent && r.patch.direction === sample.direction;
     correct += Number(ok);
@@ -147,12 +149,19 @@ async function check() {
     console.log('DEMO_MODE=true: no external provider requests.');
     return;
   }
+  try {
+    await testDecisionModel();
+    console.log(`${config.classifier}: OK`);
+  } catch (error) {
+    console.log(`${config.classifier}: ${providerError(error)}`);
+    process.exitCode = 1;
+  }
   for (const m of MODEL_DEFAULTS) {
     try {
       await testModel(m.id);
       console.log(`${m.id}: OK`);
     } catch (e) {
-      console.log(`${m.id}: ${e instanceof Error ? e.message : 'failed'}`);
+      console.log(`${m.id}: ${providerError(e)}`);
       process.exitCode = 1;
     }
   }
