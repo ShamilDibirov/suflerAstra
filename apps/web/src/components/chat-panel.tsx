@@ -2,7 +2,7 @@
 import { useChat } from '@ai-sdk/react';
 import { DefaultChatTransport, type UIMessage } from 'ai';
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowUp, BookOpen, Sparkles } from 'lucide-react';
+import { ArrowUp, BookOpen, Sparkles, Square } from 'lucide-react';
 import type { Conversation as ConversationData, Hint } from '@sufler/shared';
 import {
   Conversation,
@@ -53,6 +53,9 @@ export function ChatPanel({
   });
   useEffect(() => {
     void stop();
+    return () => {
+      void stop();
+    };
   }, [conversation.modelId, stop]);
   const busy = status === 'submitted' || status === 'streaming';
   async function send(e: React.FormEvent) {
@@ -66,8 +69,8 @@ export function ChatPanel({
     <div className="chat-layout">
       <div className="info-banner" style={{ fontSize: 12, marginBottom: 10 }}>
         {conversation.assistanceMode === 'scripts' && !conversation.salesScriptId
-          ? 'Продажи по промпту: карточка и разговор в контексте. База знаний не используется.'
-          : 'Карточка клиента и подтверждённые источники уже в контексте.'}
+          ? 'Ассистент помнит разговор и переписку. Разбирайте ситуацию, сравнивайте варианты, готовьте ответ клиенту.'
+          : 'Разговор, карточка и переписка в контексте. Условия из базы показываются с источниками.'}
       </div>
       <Conversation>
         <ConversationContent>
@@ -75,7 +78,10 @@ export function ChatPanel({
             <div className="empty-state">
               <Sparkles size={30} />
               <h3>Продолжим вместе</h3>
-              <p>Уточните шаг, попросите подобрать предложение или найти условие.</p>
+              <p>
+                Попросите разобрать ситуацию, подготовить ответ, сравнить варианты или проверить
+                условия.
+              </p>
             </div>
           )}
           {messages.map((m) => {
@@ -102,9 +108,7 @@ export function ChatPanel({
                         </details>
                       ))}
                       {hint.revision !== conversation.card.revision && (
-                        <small>
-                          Ответ из истории — запросите обновление для текущего контекста.
-                        </small>
+                        <small>Ответ учитывает контекст на момент вопроса.</small>
                       )}
                     </div>
                   )}
@@ -117,11 +121,32 @@ export function ChatPanel({
         <ConversationScrollButton />
       </Conversation>
       {error && <div className="error-banner">{error.message}</div>}
+      {!busy && (
+        <div className="chat-suggestions">
+          {[
+            'Что уже выяснили и какой следующий шаг?',
+            'Предложи фразу на последнее возражение',
+            'Оцени консультацию: что улучшить?',
+          ].map((q) => (
+            <Button
+              key={q}
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                setInput('');
+                void sendMessage({ text: q });
+              }}
+            >
+              {q}
+            </Button>
+          ))}
+        </div>
+      )}
       <form className="chat-compose" onSubmit={send}>
         <textarea
           rows={2}
           aria-label="Вопрос Суфлёру"
-          placeholder="Что ещё нужно уточнить у клиента?"
+          placeholder="Задайте вопрос, попросите разобрать ситуацию или подготовить ответ…"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
@@ -131,9 +156,20 @@ export function ChatPanel({
             }
           }}
         />
-        <Button size="icon" disabled={busy || !input.trim()} aria-label="Отправить вопрос">
-          <ArrowUp size={18} />
-        </Button>
+        {busy ? (
+          <Button
+            type="button"
+            size="icon"
+            aria-label="Остановить ответ"
+            onClick={() => void stop()}
+          >
+            <Square size={16} />
+          </Button>
+        ) : (
+          <Button size="icon" disabled={!input.trim()} aria-label="Отправить вопрос">
+            <ArrowUp size={18} />
+          </Button>
+        )}
       </form>
       <div className="chat-meta">
         {conversation.modelId} ·{' '}

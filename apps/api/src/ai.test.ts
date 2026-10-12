@@ -8,10 +8,11 @@ import {
   testDecisionModel,
   inferSpeakerRoles,
   inferBoundary,
+  assistantResponse,
 } from './ai';
 import { newConversation } from '@sufler/shared/engine';
 import { demoDocuments } from '@sufler/shared/demo';
-import { MODEL_DEFAULTS, PatchSchema, SegmentSchema } from '@sufler/shared';
+import { MODEL_DEFAULTS, PatchSchema, SegmentSchema, DEFAULT_CLASSIFICATION } from '@sufler/shared';
 vi.mock('./config', () => ({
   config: {
     demo: false,
@@ -21,6 +22,14 @@ vi.mock('./config', () => ({
     fallback: 'qwen3.8-flash',
     decisionThreshold: 0.85,
   },
+}));
+vi.mock('./classification', async (original) => ({
+  ...(await original<object>()),
+  getClassification: async () => ({
+    ...structuredClone(DEFAULT_CLASSIFICATION),
+    revision: 0,
+    updatedAt: null,
+  }),
 }));
 vi.mock('ai', () => ({ generateText: vi.fn(), Output: { object: vi.fn((schema) => schema) } }));
 const fetchMock = vi.fn();
@@ -296,4 +305,109 @@ it('extracts concrete needs even when the decision freeValues gate is low, prese
   expect(result.patch.missing).toEqual([]);
   expect(result.patch.stage).toBe('clarification');
   expect(generateText).toHaveBeenCalledOnce();
+});
+
+it('uses organization Decision model, rules and custom label choices, rejecting unconfigured values', async () => {
+  const settings = {
+    ...structuredClone(DEFAULT_CLASSIFICATION),
+    model: 'decision-custom',
+    revision: 7,
+    updatedAt: null,
+    instructions: 'Различай домашний и рабочий сценарий',
+    groups: [
+      {
+        id: 'use_case',
+        name: 'Сценарий',
+        enabled: true,
+        instructions: 'Где нужна связь?',
+        choices: [
+          { id: 'home', name: 'Дом', description: 'Связь дома' },
+          { id: 'work', name: 'Работа', description: 'Рабочие задачи' },
+        ],
+      },
+    ],
+  };
+  const data = {
+    ...response(),
+    answers: {
+      ...response().answers,
+      label_0: { type: 'choice', choice: 'home', confidence: 0.97 },
+    },
+  };
+  fetchMock.mockResolvedValue(new Response(JSON.stringify(data)));
+  const first = await classify(
+    card(),
+    demoDocuments('org'),
+    new AbortController().signal,
+    'pipeline',
+    undefined,
+    settings,
+  );
+  expect(first.patch.labels).toEqual([
+    { key: 'use_case', name: 'Сценарий', value: 'home', label: 'Дом', confidence: 0.97 },
+  ]);
+  expect(first.settingsRevision).toBe(7);
+  const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+  expect(body.model).toBe('decision-custom');
+  expect(body.questions.label_0.criteria).toHaveProperty('work');
+  expect(body.questions.intent.instructions).toContain(settings.instructions);
+  data.answers.label_0.choice = 'invented';
+  fetchMock.mockResolvedValue(new Response(JSON.stringify(data)));
+  expect(
+    (
+      await classify(
+        card(),
+        demoDocuments('org'),
+        new AbortController().signal,
+        'pipeline',
+        undefined,
+        settings,
+      )
+    ).patch.labels,
+  ).toEqual([
+    { key: 'use_case', name: 'Сценарий', value: 'unknown', label: 'Не определено', confidence: 0 },
+  ]);
+});
+
+it('gives chat a richer answer contract and real message memory while automatic hints stay concise', async () => {
+  const c = card();
+  c.messages = [
+    {
+      id: 'm1',
+      role: 'user',
+      text: 'Как ответить на дорого?',
+      createdAt: new Date().toISOString(),
+    },
+    {
+      id: 'm2',
+      role: 'assistant',
+      text: 'Сначала уточните критерий сравнения.',
+      createdAt: new Date().toISOString(),
+    },
+  ];
+  vi.mocked(generateText).mockResolvedValue({
+    output: { parts: [{ kind: 'advice', text: 'Разберём варианты ответа.' }] },
+    usage: { inputTokens: 50, outputTokens: 20 },
+  } as never);
+  await assistantResponse(
+    c,
+    'Покажи два варианта',
+    'Помогай консультанту',
+    [],
+    new AbortController().signal,
+  );
+  const chat = vi.mocked(generateText).mock.calls.at(-1)![0];
+  expect(chat.maxOutputTokens).toBe(1800);
+  expect(JSON.parse(chat.prompt as string).chat).toHaveLength(2);
+  expect(chat.system).toContain('Не ограничивай чат одной подсказкой');
+  await assistantResponse(
+    c,
+    '',
+    'Помогай консультанту',
+    [],
+    new AbortController().signal,
+    undefined,
+    'hint',
+  );
+  expect(vi.mocked(generateText).mock.calls.at(-1)![0].maxOutputTokens).toBe(450);
 });

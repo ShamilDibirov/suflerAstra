@@ -10,6 +10,7 @@ export default async function Page({ params }: { params: Promise<{ section: stri
       'processes',
       'catalog',
       'prompts',
+      'classification',
       'models',
       'users',
       'history',

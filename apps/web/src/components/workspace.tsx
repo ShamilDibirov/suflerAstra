@@ -61,6 +61,7 @@ export function Workspace() {
   const [conversation, setConversation] = useState<Conversation | null>(null),
     [models, setModels] = useState<ModelConfig[]>([]),
     [docs, setDocs] = useState<KnowledgeDocument[]>([]),
+    [intents, setIntents] = useState<{ id: string; name: string }[]>([]),
     [runtime, setRuntime] = useState({
       ragEnabled: true,
       defaultAssistanceMode: 'rag',
@@ -182,11 +183,13 @@ export function Workspace() {
         recordAudio: boolean;
         retentionDays: number;
       }>('/config'),
+      api<{ id: string; name: string }[]>('/intents'),
     ])
-      .then(async ([history, list, knowledge, settings]) => {
+      .then(async ([history, list, knowledge, settings, intents]) => {
         setRuntime(settings);
         setModels(list);
         setDocs(knowledge);
+        setIntents(intents);
         const active = history.find((c) => c.status === 'active');
         if (active) {
           const ws = await api<import('@sufler/shared').WorkingSession>(`/sessions/${active.id}`);
@@ -902,7 +905,8 @@ export function Workspace() {
               <dl className="context-group">
                 <dt>Намерение</dt>
                 <dd>
-                  {docs.find((d) => d.intent === card?.intent)?.title ||
+                  {card?.intentLabel ||
+                    docs.find((d) => d.intent === card?.intent)?.title ||
                     (
                       {
                         sales_discovery: 'Выявление потребности',
@@ -934,6 +938,18 @@ export function Workspace() {
                   ))}
                 </dd>
               </dl>
+              {!!card?.labels?.length && (
+                <dl className="context-group">
+                  <dt>Признаки обращения</dt>
+                  <dd className="context-needs">
+                    {card.labels.map((v) => (
+                      <span key={v.key} title={`Уверенность: ${Math.round(v.confidence * 100)}%`}>
+                        {v.name}: <strong>{v.label}</strong>
+                      </span>
+                    ))}
+                  </dd>
+                </dl>
+              )}
               <dl className="context-group">
                 <dt>Этап диалога</dt>
                 <dd>
@@ -960,7 +976,7 @@ export function Workspace() {
                   : card?.classificationSource === 'manual'
                     ? 'Уточнено консультантом'
                     : card?.classificationSource === 'qwen'
-                      ? 'Контекст · резервный Qwen'
+                      ? 'Контекст · резервная LLM'
                       : card?.classificationSource === 'decision'
                         ? 'Контекст обновлён · Alibaba Decision Model'
                         : 'Decision Model ещё не определил контекст')}
@@ -1123,9 +1139,9 @@ export function Workspace() {
             Основное намерение
             <select value={cardIntent} onChange={(e) => setCardIntent(e.target.value)}>
               <option value="unknown">Пока неизвестно</option>
-              {Array.from(new Map(docs.map((d) => [d.intent, d])).values()).map((d) => (
-                <option value={d.intent} key={d.intent}>
-                  {d.title}
+              {intents.map((d) => (
+                <option value={d.id} key={d.id}>
+                  {d.name}
                 </option>
               ))}
             </select>

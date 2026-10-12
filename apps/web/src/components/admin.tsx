@@ -37,6 +37,7 @@ import { Dialog } from './ui/dialog';
 import { HintMarkdown } from './hint-markdown';
 import { MetricsPanel, TariffEditor } from './metrics-panel';
 import { HistoryAnalytics } from './history-analytics';
+import { ClassificationEditor } from './classification-editor';
 import { PromptEditor } from './prompt-editor';
 type Overview = {
   documents: number;
@@ -62,7 +63,8 @@ const headings: Record<string, [string, string]> = {
   knowledge: ['База знаний', 'Проверенные знания — основа точных подсказок.'],
   processes: ['Сервисные процессы', 'Понятные шаги для каждой ситуации клиента.'],
   catalog: ['Каталог предложений', 'Тарифы, устройства, услуги и аксессуары.'],
-  prompts: ['Промпты продаж', 'Настройте стиль подсказок и работу с возражениями без базы знаний.'],
+  prompts: ['Промпты ассистента', 'Настройте подсказки и содержательные ответы в чате.'],
+  classification: ['Классификация', 'Намерения, лейблы и правила понимания разговора.'],
   models: ['AI-модели', 'Выбирайте баланс скорости, качества и стоимости.'],
   users: ['Ваша команда', 'Личные учётные записи и доступ к организации.'],
   history: ['История диалогов', 'Посмотрите, как Суфлёр помогает вашей команде.'],
@@ -299,6 +301,7 @@ export function Admin({ section }: { section: string }) {
           </button>
         </div>
       )}
+      {section === 'classification' && <ClassificationEditor key={user.orgId} />}
       {section === 'prompts' && <PromptEditor key={user.orgId} />}
       {section === 'models' && <TariffEditor />}
       {(section === 'overview' || section === 'metrics') && (
@@ -536,7 +539,8 @@ export function Admin({ section }: { section: string }) {
           <div className="info-banner">
             <strong>Классификатор контекста — Alibaba Decision Model.</strong> Его фактический
             статус показан в карточке диалога. Модель ниже отвечает за подсказки и чат. Смена модели
-            сохраняет карточку клиента. Резервный классификатор настраивается на сервере отдельно.
+            сохраняет карточку клиента. Модель классификатора, лейблы и правила доступны в разделе
+            «Классификация».
             <Button
               variant="outline"
               size="sm"

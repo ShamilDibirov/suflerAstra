@@ -43,6 +43,15 @@ import {
 import { saveTariff, summarize } from './billing';
 import { config } from './config';
 import { getPrompts, savePrompts } from './prompts';
+import { getClassification, saveClassification, classificationIntents } from './classification';
+import { chatAnswer } from './assistant';
+import { classify } from './ai';
+import {
+  ClassificationInput,
+  SegmentSchema as TestSegmentSchema,
+  type ClassificationSettings,
+} from '@sufler/shared';
+import { newConversation, applyPatch, isPublished } from '@sufler/shared/engine';
 import { DEFAULT_PROMPTS } from '@sufler/shared';
 import { session, assertAdmin, auth } from './auth';
 import { store, pool } from './store';
@@ -217,6 +226,77 @@ export class ApiController {
     }
   }
 
+  @Get('admin/classification') async classification(@Req() req: Request) {
+    const user = await session(req);
+    assertAdmin(user);
+    const docs = await store.list<KnowledgeDocument>(user.orgId, 'document');
+    return {
+      settings: await getClassification(user.orgId),
+      publishedIntents: docs
+        .filter((d) => isPublished(d, user.orgId))
+        .map((d) => ({
+          id: d.intent,
+          name: d.title,
+          description: d.description,
+          direction: d.direction,
+        })),
+    };
+  }
+  @Post('admin/classification') async updateClassification(
+    @Req() req: Request,
+    @Body() body: unknown,
+  ) {
+    return saveClassification(await session(req), body);
+  }
+  @Post('admin/classification/test') async classificationTest(
+    @Req() req: Request,
+    @Body() body: unknown,
+  ) {
+    const user = await session(req);
+    assertAdmin(user);
+    const input = z
+      .object({
+        transcript: z.string().trim().min(1).max(8000),
+        settings: ClassificationInput.optional(),
+      })
+      .parse(body);
+    const saved = await getClassification(user.orgId);
+    const settings: ClassificationSettings = input.settings
+      ? { ...input.settings, revision: saved.revision, updatedAt: saved.updatedAt }
+      : saved;
+    const c = newConversation(
+      user.orgId,
+      user.id,
+      settings.fallbackModel,
+      'Проверка классификации',
+    );
+    c.assistanceMode = 'scripts';
+    c.segments = input.transcript
+      .split(/\n/)
+      .filter(Boolean)
+      .slice(-20)
+      .map((line, i) =>
+        TestSegmentSchema.parse({
+          id: `test_${i}`,
+          text: line.replace(/^(Клиент|Консультант):\s*/i, ''),
+          role: /^Консультант:/i.test(line) ? 'consultant' : 'customer',
+          createdAt: new Date().toISOString(),
+        }),
+      );
+    const docs = (await store.list<KnowledgeDocument>(user.orgId, 'document')).filter((d) =>
+      isPublished(d, user.orgId),
+    );
+    const start = Date.now(),
+      result = await classify(c, docs, AbortSignal.timeout(35000), 'pipeline', undefined, settings);
+    return {
+      card: applyPatch(c.card, result.patch, c.segments, result.source),
+      source: result.source,
+      usage: result.usage,
+      latencyMs: Date.now() - start,
+      demo: config.demo,
+    };
+  }
+
   @Get('admin/prompts') async prompts(@Req() req: Request) {
     const user = await session(req);
     assertAdmin(user);
@@ -226,9 +306,10 @@ export class ApiController {
     return savePrompts(await session(req), body);
   }
   @Post('admin/classifier/test') async classifierTest(@Req() req: Request) {
-    assertAdmin(await session(req));
+    const user = await session(req);
+    assertAdmin(user);
     try {
-      return await testDecisionModel();
+      return await testDecisionModel((await getClassification(user.orgId)).model);
     } catch (error) {
       throw new BadRequestException(providerError(error));
     }
@@ -273,6 +354,20 @@ export class ApiController {
   }
   @Get('session') me(@Req() req: Request) {
     return session(req);
+  }
+  @Get('intents') async intentList(@Req() req: Request) {
+    const user = await session(req),
+      settings = await getClassification(user.orgId);
+    const docs = (await store.list<KnowledgeDocument>(user.orgId, 'document')).filter((d) =>
+      isPublished(d, user.orgId),
+    );
+    return Object.entries(
+      classificationIntents(
+        newConversation(user.orgId, user.id, settings.fallbackModel, 'Справочник'),
+        docs,
+        settings,
+      ),
+    ).map(([id, v]) => ({ id, name: v.name, direction: v.direction }));
   }
   @Get('models') async modelList(@Req() req: Request) {
     const user = await session(req);
@@ -380,7 +475,11 @@ export class ApiController {
     @Body() body: unknown,
   ) {
     const data = z.object({ message: z.string().min(1).max(2000) }).parse(body);
-    const h = await makeHint(await session(req), id, data.message);
+    const abort = new AbortController();
+    const close = () => abort.abort();
+    res.once('close', close);
+    const h = await chatAnswer(await session(req), id, data.message, abort.signal);
+    if (abort.signal.aborted) return;
     if (!h) throw new BadRequestException('Контекст изменился. Повторите вопрос.');
     const stream = createUIMessageStream({
       execute: ({ writer }) => {

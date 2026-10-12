@@ -27,9 +27,9 @@ export function PromptEditor() {
   return (
     <section className="panel" style={{ padding: 24 }}>
       <p className="info-banner">
-        Эти промпты работают в режиме продаж, когда опубликованный скрипт не выбран. База знаний не
-        нужна. Модель помогает вести разговор; цены, условия и сервисные регламенты проверяются
-        отдельно.
+        Промпт чата управляет ассистентом во всех режимах. Промпт подсказок задаёт стиль советов по
+        общению. Ассистент учитывает карточку, разговор и переписку; фактические условия берёт из
+        опубликованных источников.
       </p>
       {error && (
         <p role="alert" className="error-banner">
@@ -59,9 +59,7 @@ export function PromptEditor() {
         >
           {(['hintPrompt', 'chatPrompt'] as const).map((field) => (
             <label key={field} style={{ display: 'block', marginTop: 24 }}>
-              <strong>
-                {field === 'hintPrompt' ? 'Короткие подсказки' : 'Продолжение в чате'}
-              </strong>
+              <strong>{field === 'hintPrompt' ? 'Короткие подсказки' : 'Ассистент в чате'}</strong>
               <textarea
                 aria-label={field === 'hintPrompt' ? 'Промпт подсказок' : 'Промпт чата'}
                 className="input"

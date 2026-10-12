@@ -22,11 +22,14 @@ import {
 } from '@sufler/shared/engine';
 import { store } from './store';
 import { emit } from './events';
-import { classify, selectEvidence, providerError, salesAdvice, inferSpeakerRoles } from './ai';
+import { classify, selectEvidence, providerError, inferSpeakerRoles } from './ai';
 import { retrieve, scriptSources } from './knowledge';
 import { redis } from './infra';
 import { config } from './config';
 import { getPrompts } from './prompts';
+import { getClassification, classificationIntents } from './classification';
+import { assistantResponse } from './ai';
+import { renderAssistantParts } from './assistant-render';
 import { ensureSession, sessionKey, finishWorkingSession } from './working-sessions';
 
 const autoTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -390,7 +393,7 @@ async function classifyLatest(user: SessionUser, snapshot: Conversation, histori
     let result;
     try {
       result = await classify(snapshot, docs, controller.signal, 'pipeline', (reason) =>
-        status(`Decision Model не подтвердил контекст: ${reason}. Проверяем резервный Qwen…`),
+        status(`Decision Model не подтвердил контекст: ${reason}. Проверяем резервную LLM…`),
       );
     } catch (error) {
       if (controller.signal.aborted) return;
@@ -404,11 +407,18 @@ async function classifyLatest(user: SessionUser, snapshot: Conversation, histori
       ) {
         const latest = await requireConversation(user, snapshot.id, true);
         if (latest.generationEpoch === snapshot.generationEpoch)
-          await makeHint(user, snapshot.id, '', false).catch(() => null);
+          await makeHint(user, snapshot.id, '', !!latest.salesScriptId).catch(() => null);
       }
       throw error;
     }
     if (controller.signal.aborted) return;
+    if (
+      result.settingsRevision !== undefined &&
+      (await getClassification(user.orgId)).revision !== result.settingsRevision
+    ) {
+      pendingAnalysis.add(snapshot.id);
+      return;
+    }
     const c = await store.mutateConversation(user.orgId, snapshot.id, (v) => {
       if (
         (v.status !== 'active' && !historical) ||
@@ -426,6 +436,7 @@ async function classifyLatest(user: SessionUser, snapshot: Conversation, histori
         next.card.intent = pinned.intent;
         next.card.direction = 'sales';
       }
+      if (pinned) next.card.intentLabel = pinned.title;
       next.card.activeProcessId =
         pinned?.id ||
         docs.find((d) => d.intent === next.card.intent && d.type === 'process')?.id ||
@@ -434,7 +445,7 @@ async function classifyLatest(user: SessionUser, snapshot: Conversation, histori
     });
     if (!c) return;
     status(
-      `Контекст обновлён · ${result.source === 'decision' ? 'Alibaba Decision Model' : result.source === 'qwen' ? 'резервный Qwen' : 'демо'}`,
+      `Контекст обновлён · ${result.source === 'decision' ? 'Alibaba Decision Model' : result.source === 'qwen' ? 'резервная LLM' : 'демо'}`,
     );
     update(c);
     await store.put(user.orgId, 'usage', randomUUID(), {
@@ -474,6 +485,7 @@ export async function configureConversation(
   },
 ) {
   const current = await requireConversation(user, id, true);
+  const classification = await getClassification(user.orgId);
   if (patch.assistanceMode === 'rag' && !config.ragEnabled)
     throw new BadRequestException('RAG отключён на этом сервере');
   if (patch.modelId && !(await models(user.orgId)).some((m) => m.id === patch.modelId && m.enabled))
@@ -513,11 +525,12 @@ export async function configureConversation(
     )
   )
     throw new BadRequestException('Шаг не найден');
-  if (
-    patch.intent &&
-    patch.intent !== 'unknown' &&
-    !docs.some((d) => isPublished(d, user.orgId) && d.intent === patch.intent)
-  )
+  const allowedIntents = classificationIntents(
+    current,
+    docs.filter((d) => isPublished(d, user.orgId)),
+    classification,
+  );
+  if (patch.intent && patch.intent !== 'unknown' && !(patch.intent in allowedIntents))
     throw new BadRequestException('Неизвестное намерение');
   cancel(id);
   const c = await store.mutateConversation(user.orgId, id, (v) => {
@@ -542,7 +555,9 @@ export async function configureConversation(
       n.card.intent = patch.intent;
       n.card.classificationSource = 'manual';
       const d = docs.find((d) => d.intent === patch.intent);
-      n.card.direction = d?.direction || 'unknown';
+      const custom = classification.intents.find((i) => i.id === patch.intent && i.enabled);
+      n.card.direction = custom?.direction || d?.direction || 'unknown';
+      n.card.intentLabel = custom?.name || d?.title;
     }
     if (patch.completedStep)
       n.card.completedSteps = [...new Set([...n.card.completedSteps, patch.completedStep])];
@@ -628,10 +643,13 @@ export async function makeHint(
     const scriptDoc = scriptStep
       ? docs.find((d) => d.blocks.some((b) => b.id === scriptStep.id))
       : undefined;
+    const contextual = !question && !urgent && (!manual || !scriptStep);
+    const prompts = contextual ? await getPrompts(user.orgId) : null;
     const hash = createHash('sha256')
       .update(
         JSON.stringify({
-          policy: 'markdown-session-v3',
+          policy: 'contextual-hint-v4',
+          promptRevision: prompts?.revision,
           org: user.orgId,
           context: compactContext(c.card, c.segments),
           model: c.modelId,
@@ -643,21 +661,43 @@ export async function makeHint(
       )
       .digest('hex');
     const cached = redis ? await redis.get(`hint:${user.orgId}:${id}:${hash}`) : null;
-    const selected = urgent
-      ? {
-          selection: [{ documentId: urgent.document.id, blockId: urgent.blockId }],
-          inputTokens: 0,
-          outputTokens: 0,
-        }
-      : scriptStep && scriptDoc
+    type Selection = Awaited<ReturnType<typeof selectEvidence>> & {
+      parts?: Awaited<ReturnType<typeof assistantResponse>>['parts'];
+    };
+    let selected: Selection;
+    if (contextual && prompts && !cached) {
+      const candidates = scriptStep && scriptDoc ? [{ ...scriptDoc, blocks: [scriptStep] }] : docs;
+      const generated = await assistantResponse(
+        c,
+        '',
+        prompts.hintPrompt,
+        candidates,
+        controller.signal,
+        undefined,
+        'hint',
+      );
+      selected = {
+        ...generated,
+        selection: generated.parts
+          .filter((p) => p.kind === 'source')
+          .map((p) => ({ documentId: p.documentId || '', blockId: p.blockId || '' })),
+      };
+    } else
+      selected = urgent
         ? {
-            selection: [{ documentId: scriptDoc.id, blockId: scriptStep.id }],
+            selection: [{ documentId: urgent.document.id, blockId: urgent.blockId }],
             inputTokens: 0,
             outputTokens: 0,
           }
         : cached
-          ? (JSON.parse(cached) as Awaited<ReturnType<typeof selectEvidence>>)
-          : await selectEvidence(c, docs, question, controller.signal);
+          ? (JSON.parse(cached) as Selection)
+          : scriptStep && scriptDoc
+            ? {
+                selection: [{ documentId: scriptDoc.id, blockId: scriptStep.id }],
+                inputTokens: 0,
+                outputTokens: 0,
+              }
+            : await selectEvidence(c, docs, question, controller.signal);
     if (!cached && redis)
       await redis.set(`hint:${user.orgId}:${id}:${hash}`, JSON.stringify(selected), 'EX', 60);
     if (controller.signal.aborted) return null;
@@ -681,7 +721,22 @@ export async function makeHint(
         c.card,
         c.region,
       );
+      const rendered = selected.parts ? renderAssistantParts(c, valid, selected.parts) : null;
+      if (rendered && !rendered.text)
+        throw new BadRequestException('Подсказка не прошла проверку источников. Уточните вопрос.');
+      if (prompts && (await getPrompts(user.orgId)).revision !== prompts.revision) return null;
       const hint = renderHint(c.card, refs, c.modelId, {
+        ...(rendered?.text
+          ? {
+              text: rendered.text,
+              blocks: rendered.references,
+              kind: rendered.references.length
+                ? c.card.direction === 'service'
+                  ? ('service' as const)
+                  : ('sales' as const)
+                : ('coaching' as const),
+            }
+          : {}),
         ...(scriptStep ? { title: 'Следующий шаг скрипта' } : {}),
         latencyMs: Date.now() - start,
         pipelineLatencyMs:
@@ -780,7 +835,7 @@ async function makeCoachingHint(
   const hash = createHash('sha256')
     .update(
       JSON.stringify({
-        policy: 'markdown-session-v3',
+        policy: 'contextual-coaching-v4',
         context: compactContext(c.card, c.segments),
         messages: question ? c.messages.slice(-6) : [],
         model: c.modelId,
@@ -793,14 +848,29 @@ async function makeCoachingHint(
     .digest('hex');
   const key = `coaching:${user.orgId}:${c.id}:${hash}`;
   const cached = redis ? await redis.get(key) : null;
-  const advice = cached
-    ? (JSON.parse(cached) as Awaited<ReturnType<typeof salesAdvice>>)
-    : await salesAdvice(
-        c,
-        question,
-        question ? prompts.chatPrompt : prompts.hintPrompt,
-        controller.signal,
+  let advice: { text: string; inputTokens: number; outputTokens: number };
+  if (cached) advice = JSON.parse(cached);
+  else {
+    const generated = await assistantResponse(
+      c,
+      question,
+      question ? prompts.chatPrompt : prompts.hintPrompt,
+      [],
+      controller.signal,
+      undefined,
+      question ? 'chat' : 'hint',
+    );
+    const rendered = renderAssistantParts(c, [], generated.parts);
+    if (!rendered.text)
+      throw new BadRequestException(
+        'Подсказка содержит неподтверждённые условия. Уточните запрос.',
       );
+    advice = {
+      text: rendered.text,
+      inputTokens: generated.inputTokens,
+      outputTokens: generated.outputTokens,
+    };
+  }
   if (controller.signal.aborted) return null;
   if (!cached && redis) await redis.set(key, JSON.stringify(advice), 'EX', 60);
   return store.withLock(`${user.orgId}:prompts`, async () => {

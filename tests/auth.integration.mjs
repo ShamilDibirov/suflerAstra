@@ -218,6 +218,7 @@ try {
     '/api/admin/history',
     '/api/admin/models',
     '/api/admin/prompts',
+    '/api/admin/classification',
     '/api/admin/overview',
   ])
     assert.equal((await call(path, { cookie: staff })).status, 403, path);
@@ -302,6 +303,45 @@ try {
     (await call('/api/admin/prompts', { cookie: other })).body.settings.hintPrompt,
     promptValues.hintPrompt,
   );
+  const classificationSettings = (await call('/api/admin/classification', { cookie: owner })).body
+    .settings;
+  classificationSettings.intents.push({
+    id: 'retention',
+    name: 'Удержание клиента',
+    description: 'Клиент хочет отказаться от услуг',
+    direction: 'service',
+    enabled: true,
+  });
+  assert.equal(
+    (
+      await call('/api/admin/classification', {
+        cookie: staff,
+        method: 'POST',
+        body: classificationSettings,
+      })
+    ).status,
+    403,
+  );
+  assert.equal(
+    (
+      await call('/api/admin/classification', {
+        cookie: owner,
+        method: 'POST',
+        body: classificationSettings,
+      })
+    ).status,
+    201,
+  );
+  assert((await call('/api/intents', { cookie: staff })).body.some((v) => v.id === 'retention'));
+  assert(!(await call('/api/intents', { cookie: other })).body.some((v) => v.id === 'retention'));
+  const customCard = await call(`/api/conversations/${a.id}`, {
+    cookie: staff,
+    method: 'PATCH',
+    body: { intent: 'retention' },
+  });
+  assert.equal(customCard.status, 200);
+  assert.equal(customCard.body.card.intentLabel, 'Удержание клиента');
+  assert.equal(customCard.body.card.direction, 'service');
   assert.equal(
     (await call('/api/admin/sales-templates', { cookie: staff, method: 'POST', body: {} })).status,
     403,

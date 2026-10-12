@@ -18,12 +18,13 @@ import {
 } from '../apps/api/src/conversations';
 import { publishDocument, saveDocument } from '../apps/api/src/knowledge';
 import { deleteConversation, retention } from '../apps/api/src/infra';
-import { classify, selectEvidence, inferSpeakerRoles } from '../apps/api/src/ai';
+import { classify, selectEvidence, inferSpeakerRoles, assistantResponse } from '../apps/api/src/ai';
 vi.mock('../apps/api/src/ai', async (original) => ({
   ...(await original<object>()),
   classify: vi.fn(),
   selectEvidence: vi.fn(),
   inferSpeakerRoles: vi.fn(),
+  assistantResponse: vi.fn(),
 }));
 let user: SessionUser, docs: KnowledgeDocument[];
 const classification = {
@@ -58,6 +59,19 @@ beforeEach(async () => {
   docs = demoDocuments(user.orgId);
   for (const d of docs) await store.put(user.orgId, 'document', d.id, d);
   vi.mocked(classify).mockResolvedValue(structuredClone(classification));
+  vi.mocked(assistantResponse).mockResolvedValue({
+    parts: [
+      { kind: 'advice', text: 'Уточните следующий важный для клиента критерий.' },
+      {
+        kind: 'source',
+        text: docs[0].blocks[0].text,
+        documentId: docs[0].id,
+        blockId: docs[0].blocks[0].id,
+      },
+    ],
+    inputTokens: 20,
+    outputTokens: 5,
+  });
   vi.mocked(selectEvidence).mockResolvedValue({
     selection: [{ documentId: docs[0].id, blockId: docs[0].blocks[0].id }],
     inputTokens: 20,
@@ -130,14 +144,21 @@ describe('server authorization and asynchronous state', () => {
     expect((await requireConversation(user, c.id)).card.classificationSource).toBe('manual');
   });
   it('discards a late hint after model switch', async () => {
-    let resolve!: (v: Awaited<ReturnType<typeof selectEvidence>>) => void;
-    vi.mocked(selectEvidence).mockReturnValueOnce(new Promise((r) => (resolve = r)));
+    let resolve!: (v: Awaited<ReturnType<typeof assistantResponse>>) => void;
+    vi.mocked(assistantResponse).mockReturnValueOnce(new Promise((r) => (resolve = r)));
     const c = await createConversation(user);
     const pending = makeHint(user, c.id);
-    await vi.waitFor(() => expect(selectEvidence).toHaveBeenCalled());
+    await vi.waitFor(() => expect(assistantResponse).toHaveBeenCalled());
     await configureConversation(user, c.id, { modelId: MODEL_DEFAULTS[2].id });
     resolve({
-      selection: [{ documentId: docs[0].id, blockId: docs[0].blocks[0].id }],
+      parts: [
+        {
+          kind: 'source',
+          text: docs[0].blocks[0].text,
+          documentId: docs[0].id,
+          blockId: docs[0].blocks[0].id,
+        },
+      ],
       inputTokens: 1,
       outputTokens: 1,
     });
@@ -191,13 +212,21 @@ describe('server authorization and asynchronous state', () => {
     const c = await createConversation(user);
     await addSegment(user, c.id, segment());
     await waitForClassification(c.id);
-    let resolve!: (v: Awaited<ReturnType<typeof selectEvidence>>) => void;
-    vi.mocked(selectEvidence).mockReturnValueOnce(new Promise((r) => (resolve = r)));
+    let resolve!: (v: Awaited<ReturnType<typeof assistantResponse>>) => void;
+    vi.mocked(assistantResponse).mockReturnValueOnce(new Promise((r) => (resolve = r)));
     const pending = makeHint(user, c.id);
-    await vi.waitFor(() => expect(selectEvidence).toHaveBeenCalled());
+    await vi.waitFor(() => expect(assistantResponse).toHaveBeenCalled());
     await publishDocument({ ...user, role: 'admin' }, docs[0].id, 'archived');
     resolve({
-      selection: [{ documentId: docs[0].id, blockId: docs[0].blocks[0].id }],
+      parts: [
+        { kind: 'advice', text: 'Уточните важный критерий выбора.' },
+        {
+          kind: 'source',
+          text: docs[0].blocks[0].text,
+          documentId: docs[0].id,
+          blockId: docs[0].blocks[0].id,
+        },
+      ],
       inputTokens: 1,
       outputTokens: 1,
     });
@@ -460,19 +489,26 @@ it('lets an automatic hint finish while more speech arrives and then analyzes th
     ...classification,
     patch: { ...classification.patch, shouldHint: true },
   });
-  let release!: (value: Awaited<ReturnType<typeof selectEvidence>>) => void;
-  vi.mocked(selectEvidence).mockReturnValueOnce(
+  let release!: (value: Awaited<ReturnType<typeof assistantResponse>>) => void;
+  vi.mocked(assistantResponse).mockReturnValueOnce(
     new Promise((resolve) => {
       release = resolve;
     }),
   );
   await addSegment(user, c.id, segment());
-  await vi.waitFor(() => expect(selectEvidence).toHaveBeenCalledOnce());
-  const signal = vi.mocked(selectEvidence).mock.calls[0][3];
+  await vi.waitFor(() => expect(assistantResponse).toHaveBeenCalledOnce());
+  const signal = vi.mocked(assistantResponse).mock.calls[0][4];
   await addSegment(user, c.id, segment('Паспорт с собой'));
   expect(signal.aborted).toBe(false);
   release({
-    selection: [{ documentId: docs[0].id, blockId: docs[0].blocks[0].id }],
+    parts: [
+      {
+        kind: 'source',
+        text: docs[0].blocks[0].text,
+        documentId: docs[0].id,
+        blockId: docs[0].blocks[0].id,
+      },
+    ],
     inputTokens: 10,
     outputTokens: 3,
   });

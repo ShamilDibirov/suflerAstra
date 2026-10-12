@@ -94,6 +94,8 @@ export function applyPatch(
     ...card,
     direction: patch.direction,
     intent: patch.intent,
+    intentLabel: patch.intentLabel,
+    labels: patch.labels || [],
     secondaryIntents: patch.secondaryIntents,
     stage: patch.stage,
     needs: patch.needs,
@@ -223,6 +225,8 @@ export function compactContext(
     card: {
       direction: card.direction,
       intent: card.intent,
+      intentLabel: card.intentLabel,
+      labels: card.labels || [],
       secondaryIntents: card.secondaryIntents,
       stage: card.stage,
       needs: card.needs,

@@ -132,6 +132,7 @@ export function demoClassification(segments: TranscriptSegment[]): ConversationS
   return {
     direction: sim && sales ? 'mixed' : sim ? 'service' : sales ? 'sales' : 'unknown',
     intent,
+    labels: [],
     secondaryIntents: sim && device ? ['device_selection'] : [],
     stage: sim ? 'clarification' : 'discovery',
     needs: [...(sim ? ['Сохранить номер'] : []), ...(device ? ['Подобрать смартфон'] : [])],

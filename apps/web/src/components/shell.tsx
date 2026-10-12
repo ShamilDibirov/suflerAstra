@@ -31,6 +31,7 @@ const adminNav = [
   { href: '/admin/knowledge', label: 'База знаний', icon: BookOpen },
   { href: '/admin/processes', label: 'Процессы', icon: Workflow },
   { href: '/admin/catalog', label: 'Каталог', icon: ShoppingBag },
+  { href: '/admin/classification', label: 'Классификация', icon: Workflow },
   { href: '/admin/prompts', label: 'Промпты', icon: Settings2 },
   { href: '/admin/models', label: 'AI-модели', icon: Sparkles },
   { href: '/admin/users', label: 'Команда', icon: Users },

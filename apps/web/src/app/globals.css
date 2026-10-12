@@ -2335,3 +2335,102 @@ kbd {
   scrollbar-gutter: stable;
   touch-action: pan-y;
 }
+.classification-editor {
+  display: grid;
+  gap: 20px;
+}
+.classification-editor form {
+  display: grid;
+  gap: 20px;
+}
+.settings-panel {
+  padding: 24px;
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+.settings-panel h2 {
+  font-size: 19px;
+}
+.settings-panel label {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  color: #645b70;
+}
+.settings-panel input:not([type='checkbox']),
+.settings-panel textarea,
+.settings-panel select {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #e4deed;
+  border-radius: 10px;
+  padding: 11px 12px;
+  background: #fff;
+  color: #30293c;
+}
+.settings-panel textarea {
+  resize: vertical;
+}
+.settings-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 16px;
+}
+.classification-rule {
+  padding: 18px;
+  background: #faf9fd;
+  border: 1px solid #eae5f2;
+  border-radius: 12px;
+  display: grid;
+  gap: 14px;
+}
+.settings-panel .check-label {
+  display: flex;
+  align-items: center;
+}
+.classification-choice {
+  display: grid;
+  grid-template-columns: 1fr 1fr 2fr auto;
+  gap: 12px;
+  align-items: end;
+}
+.settings-save {
+  display: flex;
+  gap: 15px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.settings-save span {
+  font-size: 12px;
+  color: #807789;
+}
+.classification-result {
+  border-left: 3px solid #8962db;
+  background: #f7f3ff;
+  padding: 16px;
+  border-radius: 8px;
+}
+.classification-result pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+.chat-suggestions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 12px 0;
+}
+@media (max-width: 650px) {
+  .settings-panel {
+    padding: 16px;
+  }
+  .settings-heading {
+    flex-wrap: wrap;
+  }
+  .classification-choice {
+    grid-template-columns: 1fr;
+  }
+}
